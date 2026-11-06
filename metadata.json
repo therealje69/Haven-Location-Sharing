@@ -1,0 +1,10 @@
+{
+  "name": "Haven",
+  "description": "A safe space for shared presence. Private, metered location sharing between two people with 1-minute cooldown, 5 daily check-ins, and emergency support.",
+  "requestFramePermissions": [
+    "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

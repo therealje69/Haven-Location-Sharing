@@ -1,0 +1,21 @@
+{
+  "brandName": "Haven",
+  "tagline": "A safe space for shared presence.",
+  "domain": "haven.com",
+  "category": "Metaphorical & Evocative",
+  "colors": {
+    "primary": "#3B82F6",
+    "accent": "#2DD4BF",
+    "background": "#091326"
+  },
+  "typography": {
+    "headingFont": "JetBrains Mono",
+    "bodyFont": "Inter"
+  },
+  "clearanceStatus": {
+    "dotComAvailable": true,
+    "trademarkScreeningClear": true,
+    "copyrightAndHandlesClear": true
+  },
+  "exportedAt": "2026-11-05T15:08:02.536Z"
+}

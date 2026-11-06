@@ -1,0 +1,120 @@
+{
+  "profiles": {
+    "partner1": {
+      "id": "partner1",
+      "name": "Jordan",
+      "nicknameForPartner": "",
+      "avatarColor": "amber",
+      "battery": 88,
+      "isCharging": false,
+      "network": "5G",
+      "lastSeen": 1793906149164,
+      "currentLocation": {
+        "lat": 37.7955,
+        "lng": -122.3937,
+        "accuracy": 8,
+        "address": "Ferry Building, The Embarcadero",
+        "city": "San Francisco, CA",
+        "timestamp": 1793905196514
+      },
+      "isLoggedOut": false,
+      "themeMode": "day",
+      "googleUser": null,
+      "hasCompletedSetup": true,
+      "criticalAlertsAllowed": true
+    },
+    "partner2": {
+      "id": "partner2",
+      "name": "Taylor",
+      "nicknameForPartner": "",
+      "avatarColor": "sage",
+      "battery": 64,
+      "isCharging": true,
+      "network": "Wi-Fi",
+      "lastSeen": 1793906096514,
+      "currentLocation": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "accuracy": 12,
+        "address": "Mission Dolores Park, 19th & Dolores St",
+        "city": "San Francisco, CA",
+        "timestamp": 1793905616514
+      },
+      "isLoggedOut": false,
+      "themeMode": "day",
+      "googleUser": null,
+      "hasCompletedSetup": true,
+      "criticalAlertsAllowed": true
+    }
+  },
+  "pings": [],
+  "auditLog": [
+    {
+      "id": "audit-reset-1793906262405",
+      "timestamp": 1793906262405,
+      "type": "token_refreshed",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Check-ins Refreshed",
+      "message": "Daily check-in allowance replenished for both partners.",
+      "tokensRemainingAfter": 5
+    },
+    {
+      "id": "audit-resolved-1793906262383",
+      "timestamp": 1793906262383,
+      "type": "emergency_dismissed",
+      "actor": "partner2",
+      "target": "partner1",
+      "title": "Marked Safe",
+      "message": "Taylor confirmed they are safe and closed the urgent alert.",
+      "tokensRemainingAfter": 5
+    },
+    {
+      "id": "audit-emerg-1793906128027",
+      "timestamp": 1793906128027,
+      "type": "emergency_override",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Urgent Alert Triggered",
+      "message": "Jordan sent an urgent alert to Taylor.",
+      "tokensRemainingAfter": 4,
+      "locationSnapshot": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "approxAddress": "Mission Dolores Park, 19th & Dolores St"
+      }
+    },
+    {
+      "id": "audit-seed-0",
+      "timestamp": 1793819696514,
+      "type": "safety_battery_check",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Haven Connected",
+      "message": "Mutual connection active. 5 gentle daily check-ins available.",
+      "tokensRemainingAfter": 5
+    },
+    {
+      "id": "audit-seed-1",
+      "timestamp": 1793841296514,
+      "type": "standard_ping",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Location Viewed",
+      "message": "Jordan requested Taylor's location.",
+      "tokensRemainingAfter": 4,
+      "ephemeralSeconds": 60,
+      "locationSnapshot": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "approxAddress": "Mission Dolores Park, 19th & Dolores St"
+      }
+    }
+  ],
+  "appRelease": {
+    "version": "1.2.1",
+    "buildId": 2,
+    "publishedAt": 1793906131916,
+    "releaseNotes": "Settings & alerts update"
+  }
+}
