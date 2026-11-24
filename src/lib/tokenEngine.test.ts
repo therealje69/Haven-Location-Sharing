@@ -9,15 +9,15 @@ import {
   createAuditLogEntry,
   MAX_DAILY_TOKENS,
   ROLLING_WINDOW_MS
-} from './tokenEngine.js';
-import { PingRecord } from './types.js';
+} from './tokenEngine.ts';
+import type { PingRecord } from './types.ts';
 
 test('initial state provides full token allowance', () => {
   const pings: PingRecord[] = [];
   const now = 1700000000000;
   const status = calculateTokenStatus(pings, 'partner1', now);
 
-  assert.equal(status.tokensRemaining, 5);
+  assert.equal(status.tokensRemaining, 8);
   assert.equal(status.usedInWindow, 0);
   assert.equal(status.nextRefreshAt, null);
   assert.equal(status.msUntilNextRefresh, null);
@@ -26,7 +26,7 @@ test('initial state provides full token allowance', () => {
   assert.equal(check.allowed, true);
 });
 
-test('spending 1 token reduces remaining count to 4 and sets refresh timer', () => {
+test('spending 1 token reduces remaining count to 7 and sets refresh timer', () => {
   const now = 1700000000000;
   const pings: PingRecord[] = [
     {
@@ -40,7 +40,7 @@ test('spending 1 token reduces remaining count to 4 and sets refresh timer', () 
   ];
 
   const status = calculateTokenStatus(pings, 'partner1', now);
-  assert.equal(status.tokensRemaining, 4);
+  assert.equal(status.tokensRemaining, 7);
   assert.equal(status.usedInWindow, 1);
   assert.equal(status.nextRefreshAt, now + ROLLING_WINDOW_MS);
   assert.equal(status.msUntilNextRefresh, ROLLING_WINDOW_MS);
@@ -73,10 +73,10 @@ test('enforces 1-minute cooldown block between spending tokens', () => {
   assert.equal(afterCooldown.allowed, true);
 });
 
-test('spending 5 tokens blocks routine requests but emergency override passes', () => {
+test('spending 8 tokens blocks routine requests but emergency override passes', () => {
   const baseTime = 1700000000000;
-  // 5 pings spaced 2 minutes apart to satisfy 1-minute cooldown
-  const pings: PingRecord[] = [0, 1, 2, 3, 4].map((i) => ({
+  // 8 pings spaced 2 minutes apart to satisfy 1-minute cooldown
+  const pings: PingRecord[] = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => ({
     id: `ping-${i + 1}`,
     requesterId: 'partner1' as const,
     targetId: 'partner2' as const,
@@ -85,12 +85,12 @@ test('spending 5 tokens blocks routine requests but emergency override passes', 
     type: 'standard' as const,
   }));
 
-  const now = baseTime + 4 * 120000 + 70000; // 70s after 5th ping (cooldown clear)
+  const now = baseTime + 7 * 120000 + 70000; // 70s after 8th ping (cooldown clear)
   const status = calculateTokenStatus(pings, 'partner1', now);
   assert.equal(status.tokensRemaining, 0);
-  assert.equal(status.usedInWindow, 5);
+  assert.equal(status.usedInWindow, 8);
 
-  // Standard request must be denied because 5/5 tokens used
+  // Standard request must be denied because 8/8 tokens used
   const standardCheck = canRequestLocation(pings, 'partner1', now, false);
   assert.equal(standardCheck.allowed, false);
   assert.match(standardCheck.reason ?? '', /Daily limit reached/);
@@ -117,7 +117,7 @@ test('tokens replenish after rolling 24-hour expiration', () => {
   const laterTime = baseTime + ROLLING_WINDOW_MS + 1000;
   const status = calculateTokenStatus(pings, 'partner1', laterTime);
 
-  assert.equal(status.tokensRemaining, 5);
+  assert.equal(status.tokensRemaining, 8);
   assert.equal(status.usedInWindow, 0);
   assert.equal(status.nextRefreshAt, null);
 });

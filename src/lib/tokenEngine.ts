@@ -1,6 +1,6 @@
-import { AuditLogEntry, EmergencySession, LocationCoordinate, PingRecord, UserRole } from './types.js';
+import type { AuditLogEntry, EmergencySession, LocationCoordinate, PingRecord, UserRole } from './types.ts';
 
-export const MAX_DAILY_TOKENS = 5;
+export const MAX_DAILY_TOKENS = 8;
 export const ROLLING_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 export const TOKEN_COOLDOWN_MS = 60 * 1000; // 1 minute (60 seconds) cooldown between calls
 export const STANDARD_VIEW_DURATION_MS = 60 * 1000; // 60 seconds (1 minute)
@@ -58,7 +58,7 @@ export function calculateTokenStatus(
 
 /**
  * Checks if a user is authorized to request location.
- * Enforces 1-minute cooldown block and 5 daily limit.
+ * Enforces 1-minute cooldown block and 8 daily limit.
  */
 export function canRequestLocation(
   pings: PingRecord[],
@@ -94,7 +94,7 @@ export function canRequestLocation(
       : 'in a little while';
     return {
       allowed: false,
-      reason: `Daily limit reached (5/5 used). Next check-in is available at ${refreshDateStr}. Urgent check-in is still available if you need help.`,
+      reason: `Daily limit reached (${MAX_DAILY_TOKENS}/${MAX_DAILY_TOKENS} used). Next check-in is available at ${refreshDateStr}. Urgent check-in is still available if you need help.`,
     };
   }
 

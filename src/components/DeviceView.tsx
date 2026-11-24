@@ -1,13 +1,24 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { AppSyncState, ThemeMode, UserProfile, UserRole, formatPartnerDisplayName } from '../lib/types.js';
+import {
+  AppSyncState,
+  ThemeMode,
+  UserProfile,
+  UserRole,
+  formatPartnerDisplayName,
+  isDefaultUnsetName,
+} from '../lib/types.js';
 import { formatDynamicNotificationTime } from '../lib/tokenEngine.js';
 import { GoogleMapView } from './GoogleMapView.js';
 import { HavenLogoIcon } from './HavenLogo.js';
 import { AuditTrailView } from './AuditTrailView.js';
 import { SettingsView } from './SettingsView.js';
 import { EmergencyModal } from './EmergencyModal.js';
-import { DeviceUpdateBanner } from './PWAInstallAndUpdate.js';
-import { playGentleChime, unlockEmergencyAudioChannel } from '../lib/easAudio.js';
+import { DeviceUpdateBanner, subscribeDeviceToWebPush } from './PWAInstallAndUpdate.js';
+import {
+  playGentleChime,
+  startEASSiren,
+  unlockEmergencyAudioChannel,
+} from '../lib/easAudio.js';
 import {
   MapPin,
   Clock,
@@ -16,7 +27,8 @@ import {
   BatteryCharging,
   AlertTriangle,
   X,
-  Lock
+  Lock,
+  Volume2,
 } from 'lucide-react';
 
 interface DeviceViewProps {
@@ -29,9 +41,46 @@ interface DeviceViewProps {
   onResetTokens: () => Promise<void>;
   onPushAppUpdate: () => Promise<void>;
   onOpenSetup: (role: UserRole) => void;
+  onOpenInstallModal?: () => void;
+  isRealDeviceMode?: boolean;
   theme: 'day' | 'night';
   currentThemeMode: ThemeMode;
   onThemeModeChange: (mode: ThemeMode) => void;
+}
+
+/**
+ * Helper to display a system-level OS notification via ServiceWorkerRegistration
+ * (which displays over any open app and on the lock screen when the screen is off)
+ * with fallback to the standard Notification constructor.
+ */
+async function triggerSystemPopupNotification(
+  title: string,
+  options: NotificationOptions & { renotify?: boolean; vibrate?: number[] }
+) {
+  if (typeof window === 'undefined' || !('Notification' in window)) return;
+  if (Notification.permission !== 'granted') return;
+
+  try {
+    if ('serviceWorker' in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      if (reg && 'showNotification' in reg) {
+        await reg.showNotification(title, {
+          icon: '/pwa-192x192.png',
+          badge: '/pwa-192x192.png',
+          ...options,
+        });
+        return;
+      }
+    }
+  } catch {
+    // Fallback to window Notification below
+  }
+
+  try {
+    new Notification(title, options);
+  } catch {
+    // Safe fallback
+  }
 }
 
 export const DeviceView: React.FC<DeviceViewProps> = ({
@@ -44,6 +93,8 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
   onResetTokens,
   onPushAppUpdate,
   onOpenSetup,
+  onOpenInstallModal,
+  isRealDeviceMode = false,
   theme,
   currentThemeMode,
   onThemeModeChange,
@@ -53,57 +104,254 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
     return localStorage.getItem(`haven_dismissed_ping_${myRole}`) || null;
   });
 
-  // Synchronize dismissedPingId if myRole changes
+  const targetRole: UserRole = myRole === 'partner1' ? 'partner2' : 'partner1';
+  const myProfile = state.profiles[myRole];
+  const partnerProfile = state.profiles[targetRole];
+
+  // Mandatory Emergency Override Permission Check
+  const isPermissionDeclined = myProfile.criticalAlertsAllowed === false;
+  const [showDeclinedPopup, setShowDeclinedPopup] = useState<boolean>(isPermissionDeclined);
+
+  useEffect(() => {
+    if (isPermissionDeclined) {
+      setShowDeclinedPopup(true);
+    } else {
+      setShowDeclinedPopup(false);
+    }
+  }, [isPermissionDeclined]);
+
   useEffect(() => {
     setDismissedPingId(localStorage.getItem(`haven_dismissed_ping_${myRole}`) || null);
   }, [myRole]);
 
-  // Current time ticker for dynamic relative time updates ("just now", "a minute ago", etc.)
+  // Current time ticker for dynamic relative time updates
   const [nowTime, setNowTime] = useState<number>(Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNowTime(Date.now()), 5000);
     return () => clearInterval(timer);
   }, []);
 
-  // Request browser Notification permission once if available
+  // Register device for background Web Push (works when app is completely closed or screen is off)
   useEffect(() => {
-    if (typeof window !== 'undefined' && 'Notification' in window) {
-      if (Notification.permission === 'default') {
-        Notification.requestPermission().catch(() => {});
-      }
+    if (!isPermissionDeclined) {
+      subscribeDeviceToWebPush(myRole).catch(() => {});
     }
-  }, []);
+  }, [myRole, isPermissionDeclined]);
+
+  // Listen for Service Worker background push messages to immediately trigger full-volume audio
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+
+    const handleSWMessage = (event: MessageEvent) => {
+      const data = event.data;
+      if (!data) return;
+      if (data.type === 'HAVEN_BACKGROUND_PUSH') {
+        const payload = data.payload || {};
+        if (payload.targetRole && payload.targetRole !== myRole) return;
+        if (payload.type === 'emergency_alert') {
+          unlockEmergencyAudioChannel();
+          startEASSiren(1.0);
+        } else if (payload.type === 'standard_ping') {
+          playGentleChime();
+        }
+      }
+    };
+
+    navigator.serviceWorker.addEventListener('message', handleSWMessage);
+    return () => navigator.serviceWorker.removeEventListener('message', handleSWMessage);
+  }, [myRole]);
+
+  // Background Web Worker Heartbeat Poller:
+  // Because mobile browsers throttle main-thread timers when the screen is off or another app is open,
+  // this dedicated Worker thread polls /api/state in the background so incoming location views and
+  // emergency alerts fire the lock-screen pop-up and 100% volume chime immediately.
+  const bgKnownPingIdRef = useRef<string | null>(null);
+  const bgKnownEmergencyStartRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof Worker === 'undefined' || isPermissionDeclined) {
+      return;
+    }
+
+    const workerCode = `
+      let timer = null;
+      self.onmessage = (e) => {
+        if (e.data === 'start') {
+          if (timer) clearInterval(timer);
+          timer = setInterval(async () => {
+            try {
+              const res = await fetch('/api/state');
+              if (res.ok) {
+                const state = await res.json();
+                self.postMessage({ type: 'BG_STATE', state });
+              }
+            } catch {}
+          }, 3000);
+        } else if (e.data === 'stop') {
+          if (timer) clearInterval(timer);
+          timer = null;
+        }
+      };
+    `;
+
+    const blob = new Blob([workerCode], { type: 'application/javascript' });
+    const workerUrl = URL.createObjectURL(blob);
+    const worker = new Worker(workerUrl);
+
+    worker.onmessage = (e) => {
+      if (e.data?.type !== 'BG_STATE' || !e.data.state) return;
+      const bgState: AppSyncState = e.data.state;
+
+      // Check for incoming routine location check-in targeting myRole
+      const latestPing = (bgState.pings || [])
+        .filter((p) => p.targetId === myRole && p.type === 'standard')
+        .sort((a, b) => b.timestamp - a.timestamp)[0];
+
+      if (latestPing) {
+        if (bgKnownPingIdRef.current === null) {
+          bgKnownPingIdRef.current = latestPing.id;
+        } else if (latestPing.id !== bgKnownPingIdRef.current) {
+          bgKnownPingIdRef.current = latestPing.id;
+          if (document.hidden) {
+            const reqProfile = bgState.profiles[latestPing.requesterId];
+            const myProf = bgState.profiles[myRole];
+            const reqName = formatPartnerDisplayName(reqProfile.name, myProf.nicknameForPartner);
+            playGentleChime();
+            triggerSystemPopupNotification('Haven', {
+              body: `${reqName} viewed your location`,
+              tag: `haven-ping-${latestPing.id}`,
+              renotify: true,
+              vibrate: [250, 120, 250],
+            });
+          }
+        }
+      }
+
+      // Check for incoming emergency alert targeting myRole
+      const emerg = bgState.activeEmergency;
+      if (emerg && emerg.active && emerg.initiatedBy !== myRole) {
+        if (bgKnownEmergencyStartRef.current !== emerg.startedAt) {
+          bgKnownEmergencyStartRef.current = emerg.startedAt;
+          unlockEmergencyAudioChannel();
+          startEASSiren(1.0);
+          const reqProfile = bgState.profiles[emerg.initiatedBy];
+          const myProf = bgState.profiles[myRole];
+          const reqName = formatPartnerDisplayName(reqProfile.name, myProf.nicknameForPartner);
+          triggerSystemPopupNotification('URGENT ALERT — Haven', {
+            body: `${reqName} sent an urgent alert to check on you.`,
+            tag: 'haven-emergency-alert',
+            requireInteraction: true,
+            renotify: true,
+            vibrate: [600, 150, 600, 150, 900, 150, 600, 150, 900],
+          });
+        }
+      } else {
+        bgKnownEmergencyStartRef.current = null;
+      }
+    };
+
+    worker.postMessage('start');
+
+    return () => {
+      worker.postMessage('stop');
+      worker.terminate();
+      URL.revokeObjectURL(workerUrl);
+    };
+  }, [myRole, isPermissionDeclined]);
+
+  // Real Hardware GPS & Battery Sync when running in single-device mode on a phone
+  useEffect(() => {
+    if (!isRealDeviceMode || typeof window === 'undefined' || isPermissionDeclined) return;
+
+    let watchId: number | null = null;
+    let lastGeoSync = 0;
+
+    if ('geolocation' in navigator) {
+      watchId = navigator.geolocation.watchPosition(
+        (pos) => {
+          const now = Date.now();
+          if (now - lastGeoSync < 15000) return;
+          lastGeoSync = now;
+          const lat = Number(pos.coords.latitude.toFixed(6));
+          const lng = Number(pos.coords.longitude.toFixed(6));
+          const accuracy = Math.round(pos.coords.accuracy || 10);
+          onUpdateProfile(myRole, {
+            currentLocation: {
+              lat,
+              lng,
+              accuracy,
+              address: `${lat.toFixed(4)}°, ${lng.toFixed(4)}°`,
+              city: 'Live GPS Signal',
+              timestamp: now,
+            },
+          });
+        },
+        () => {},
+        { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 }
+      );
+    }
+
+    const navWithBattery = navigator as Navigator & {
+      getBattery?: () => Promise<{
+        level: number;
+        charging: boolean;
+        addEventListener: (type: string, fn: () => void) => void;
+      }>;
+    };
+
+    if (typeof navWithBattery.getBattery === 'function') {
+      navWithBattery
+        .getBattery()
+        .then((batt) => {
+          const syncBattery = () => {
+            onUpdateProfile(myRole, {
+              battery: Math.round(batt.level * 100),
+              isCharging: Boolean(batt.charging),
+            });
+          };
+          syncBattery();
+          batt.addEventListener('levelchange', syncBattery);
+          batt.addEventListener('chargingchange', syncBattery);
+        })
+        .catch(() => {});
+    }
+
+    return () => {
+      if (watchId !== null && 'geolocation' in navigator) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+    };
+  }, [isRealDeviceMode, myRole, isPermissionDeclined]);
 
   // 3-second hold logic for Emergency Override
   const [holdProgress, setHoldProgress] = useState(0);
   const [isHolding, setIsHolding] = useState(false);
   const holdIntervalRef = useRef<number | null>(null);
 
-  const targetRole: UserRole = myRole === 'partner1' ? 'partner2' : 'partner1';
-  const myProfile = state.profiles[myRole];
-  const partnerProfile = state.profiles[targetRole];
-
   const isDay = theme === 'day';
   const myTokens = state.tokens[myRole];
   const nextRefresh = state.tokenRefreshTimes[myRole];
   const msUntilRefresh = nextRefresh ? Math.max(0, nextRefresh - Date.now()) : null;
 
-  // Format partner display name with MY device's optional private nickname: e.g. Jordan "The King" or Jordan
-  const partnerDisplayName = formatPartnerDisplayName(partnerProfile.name, myProfile.nicknameForPartner);
+  const isPartnerNameUnset =
+    isDefaultUnsetName(partnerProfile.name) && !myProfile.nicknameForPartner?.trim();
+  const partnerDisplayName = formatPartnerDisplayName(
+    partnerProfile.name,
+    myProfile.nicknameForPartner
+  );
 
-  // Active view status:
-  // 1. Standard 1-minute ping requested by this device
+  // Active view status
   const activeStandardPingByMe = state.pings
     .filter((p) => p.requesterId === myRole && p.type === 'standard' && p.expiresAt > Date.now())
     .sort((a, b) => b.expiresAt - a.expiresAt)[0];
 
-  // 2. Active emergency initiated by this device (immediately closes when partner marks themselves safe)
   const isEmergencyActiveForMe = Boolean(
     state.activeEmergency?.active && state.activeEmergency.initiatedBy === myRole
   );
 
   const activeExpiresAt = activeStandardPingByMe ? activeStandardPingByMe.expiresAt : 0;
-  const isViewActive = isEmergencyActiveForMe || activeExpiresAt > Date.now();
+  const isViewActive =
+    !isPermissionDeclined && (isEmergencyActiveForMe || activeExpiresAt > Date.now());
 
   const [timeRemainingSeconds, setTimeRemainingSeconds] = useState(0);
 
@@ -133,31 +381,38 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
     .filter((p) => p.targetId === myRole && p.type === 'standard')
     .sort((a, b) => b.timestamp - a.timestamp)[0];
 
-  // Fire sound and native Web Notification if available when a new check-in happens
+  // Fire sound and OS system notification when a new check-in happens
   const lastFiredPingIdRef = useRef<string | null>(latestPingForMe?.id || null);
   useEffect(() => {
     if (latestPingForMe && latestPingForMe.id !== lastFiredPingIdRef.current) {
       lastFiredPingIdRef.current = latestPingForMe.id;
-      playGentleChime();
-
-      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
-        try {
-          const reqName = formatPartnerDisplayName(partnerProfile.name, myProfile.nicknameForPartner);
-          new Notification('Haven', {
-            body: `${reqName} requested your location`,
-          });
-        } catch {
-          // Fallback safe
-        }
+      bgKnownPingIdRef.current = latestPingForMe.id;
+      if (!isPermissionDeclined) {
+        playGentleChime();
+        const reqName = formatPartnerDisplayName(
+          partnerProfile.name,
+          myProfile.nicknameForPartner
+        );
+        triggerSystemPopupNotification('Haven', {
+          body: `${reqName} viewed your location`,
+          tag: `haven-ping-${latestPingForMe.id}`,
+          renotify: true,
+          vibrate: [250, 120, 250],
+        });
       }
     }
-  }, [latestPingForMe?.id, partnerProfile.name, myProfile.nicknameForPartner]);
+  }, [
+    latestPingForMe?.id,
+    partnerProfile.name,
+    myProfile.nicknameForPartner,
+    isPermissionDeclined,
+  ]);
 
-  // Determine if popup banner should display
   const shouldShowNotification =
+    !isPermissionDeclined &&
     latestPingForMe &&
     latestPingForMe.id !== dismissedPingId &&
-    (nowTime - latestPingForMe.timestamp < 30 * 24 * 3600 * 1000);
+    nowTime - latestPingForMe.timestamp < 30 * 24 * 3600 * 1000;
 
   const handleDismissAlert = () => {
     if (latestPingForMe) {
@@ -166,8 +421,20 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
     }
   };
 
+  const handlePrimaryCheckInClick = () => {
+    if (isPermissionDeclined) {
+      setShowDeclinedPopup(true);
+      return;
+    }
+    onRequestLocation(myRole);
+  };
+
   // Handle Emergency Hold
   const startHold = () => {
+    if (isPermissionDeclined) {
+      setShowDeclinedPopup(true);
+      return;
+    }
     unlockEmergencyAudioChannel();
     setIsHolding(true);
     setHoldProgress(0);
@@ -205,9 +472,7 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
   return (
     <div
       className={`relative flex flex-col h-full w-full select-none overflow-hidden transition-colors duration-200 ${
-        isDay
-          ? 'bg-slate-50 text-slate-900'
-          : 'bg-[#091326] text-slate-100'
+        isDay ? 'bg-slate-50 text-slate-900' : 'bg-[#091326] text-slate-100'
       }`}
     >
       {/* SEAMLESS OVER-THE-AIR (OTA) APP UPDATE BANNER */}
@@ -217,7 +482,7 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         isDay={isDay}
       />
 
-      {/* INCOMING LOCATION REQUEST POPUP BANNER (Dynamic relative time, no time constraints) */}
+      {/* INCOMING LOCATION VIEWED POPUP BANNER */}
       {shouldShowNotification && latestPingForMe && (
         <div
           className={`px-3.5 py-2.5 flex items-center justify-between text-xs font-medium border-b animate-slideDown z-40 ${
@@ -229,8 +494,10 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
           <div className="flex items-center gap-2 truncate min-w-0 mr-2">
             <HavenLogoIcon size={18} className="shrink-0" />
             <div className="truncate text-xs">
-              <span className="font-semibold">{partnerDisplayName}</span>
-              <span className="opacity-90"> requested your location</span>
+              <span className={`font-semibold ${isPartnerNameUnset ? 'opacity-50 text-slate-400' : ''}`}>
+                {partnerDisplayName}
+              </span>
+              <span className="opacity-90"> viewed your location</span>
               <span className="text-[11px] text-[#2DD4BF] dark:text-[#2DD4BF] ml-1.5 font-mono">
                 · {formatDynamicNotificationTime(latestPingForMe.timestamp, nowTime)}
               </span>
@@ -246,12 +513,10 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         </div>
       )}
 
-      {/* COMPACT TOP HEADER: Logo only on upper-left (no account owner name text) */}
+      {/* COMPACT TOP HEADER: Logo only on upper-left */}
       <header
         className={`px-3.5 py-2.5 border-b flex items-center justify-between z-10 ${
-          isDay
-            ? 'bg-white/90 border-slate-200'
-            : 'bg-[#091326]/90 border-slate-800'
+          isDay ? 'bg-white/90 border-slate-200' : 'bg-[#091326]/90 border-slate-800'
         }`}
       >
         <div className="flex items-center">
@@ -262,10 +527,18 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         <div className="text-right">
           <div
             className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-xl border text-[11px] font-medium ${
-              isDay ? 'bg-slate-100 border-slate-200 text-slate-700' : 'bg-slate-800/80 border-slate-700 text-slate-300'
+              isDay
+                ? 'bg-slate-100 border-slate-200 text-slate-700'
+                : 'bg-slate-800/80 border-slate-700 text-slate-300'
             }`}
           >
-            <span className="font-semibold truncate max-w-[130px]">{partnerDisplayName}</span>
+            <span
+              className={`font-semibold truncate max-w-[130px] ${
+                isPartnerNameUnset ? 'text-slate-400/50' : ''
+              }`}
+            >
+              {partnerDisplayName}
+            </span>
             <span className="text-slate-400">·</span>
             {partnerProfile.isLoggedOut ? (
               <span className="text-slate-400 text-[10px]">Offline</span>
@@ -283,17 +556,17 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         </div>
       </header>
 
-      {/* MAIN VIEWPORT (Clean, fits above the fold, smoothly scrollable without scrollbars if needed) */}
+      {/* MAIN VIEWPORT */}
       <main className="flex-1 overflow-y-auto no-scrollbar p-3 flex flex-col justify-between">
         {currentTab === 'map' && (
           <div className="h-full flex flex-col justify-between gap-2.5">
-            {/* Interactive Map Area (Powered by Google Maps Platform via @vis.gl/react-google-maps) */}
-            <div className="flex-1 w-full min-h-[220px] max-h-[310px]">
+            {/* Interactive Map Area */}
+            <div className={`flex-1 w-full min-h-[220px] ${isRealDeviceMode ? '' : 'max-h-[310px]'}`}>
               <GoogleMapView
                 partnerLocation={partnerProfile.currentLocation}
                 partnerDisplayName={partnerDisplayName}
-                isLocked={!isViewActive}
-                isEmergency={isEmergencyActiveForMe}
+                isLocked={!isViewActive || isPermissionDeclined}
+                isEmergency={isEmergencyActiveForMe && !isPermissionDeclined}
                 timeRemainingSeconds={timeRemainingSeconds}
                 myRole={myRole}
                 theme={theme}
@@ -303,7 +576,28 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
 
             {/* ACTION DECK */}
             <div className="space-y-2 pt-0.5">
-              {isEmergencyActiveForMe ? (
+              {isPermissionDeclined ? (
+                <>
+                  <button
+                    onClick={() => setShowDeclinedPopup(true)}
+                    className="w-full py-3 px-4 rounded-xl bg-slate-300 dark:bg-slate-800 text-slate-500 dark:text-slate-400 font-semibold text-xs flex items-center justify-center gap-2 cursor-not-allowed"
+                  >
+                    <span>See </span>
+                    <span className={isPartnerNameUnset ? 'opacity-50' : ''}>
+                      {partnerDisplayName}
+                    </span>
+                  </button>
+                  <button
+                    onClick={() => setShowDeclinedPopup(true)}
+                    className={`w-full py-2.5 px-3 rounded-xl border text-center font-bold text-[11px] text-slate-400 flex items-center justify-center gap-1.5 cursor-not-allowed ${
+                      isDay ? 'border-slate-200 bg-slate-100' : 'border-slate-800 bg-slate-900'
+                    }`}
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" />
+                    <span>Hold 3s for Urgent Alert</span>
+                  </button>
+                </>
+              ) : isEmergencyActiveForMe ? (
                 <button
                   onClick={() => onResolveEmergency(myRole)}
                   className="w-full py-3 px-4 rounded-xl bg-rose-600 hover:bg-rose-700 active:scale-98 text-white font-bold text-xs shadow-md flex items-center justify-center gap-2 transition"
@@ -314,7 +608,9 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
               ) : partnerProfile.isLoggedOut ? (
                 <div
                   className={`w-full py-3 px-4 rounded-xl border text-center text-xs font-semibold flex items-center justify-center gap-2 ${
-                    isDay ? 'bg-slate-100 text-slate-500 border-slate-200' : 'bg-slate-900 text-slate-400 border-slate-800'
+                    isDay
+                      ? 'bg-slate-100 text-slate-500 border-slate-200'
+                      : 'bg-slate-900 text-slate-400 border-slate-800'
                   }`}
                 >
                   <Lock className="w-3.5 h-3.5" />
@@ -322,21 +618,21 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
                 </div>
               ) : (
                 <>
-                  {/* Primary Action Button: "See [name]" with brand gradient */}
                   <button
-                    onClick={() => onRequestLocation(myRole)}
+                    onClick={handlePrimaryCheckInClick}
                     disabled={myTokens <= 0 || isViewActive}
-                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-[#3B82F6] to-[#2563EB] hover:from-[#2563EB] hover:to-[#1D4ED8] active:scale-98 disabled:opacity-40 disabled:pointer-events-none text-white font-semibold text-xs shadow-md shadow-blue-500/20 flex items-center justify-center gap-2 transition font-['Inter',sans-serif]"
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-[#3B82F6] to-[#2563EB] hover:from-[#2563EB] hover:to-[#1D4ED8] active:scale-98 disabled:opacity-40 disabled:pointer-events-none text-white font-semibold text-xs shadow-md shadow-blue-500/20 flex items-center justify-center gap-1.5 transition font-['Inter',sans-serif]"
                   >
-                    <span>See {partnerDisplayName}</span>
+                    <span>See </span>
+                    <span className={isPartnerNameUnset ? 'text-white/60' : ''}>
+                      {partnerDisplayName}
+                    </span>
                   </button>
 
                   {/* 3-Second Hold Urgent Alert Button */}
                   <div
                     className={`relative rounded-xl overflow-hidden border ${
-                      isDay
-                        ? 'border-slate-200 bg-white'
-                        : 'border-slate-800 bg-[#091326]'
+                      isDay ? 'border-slate-200 bg-white' : 'border-slate-800 bg-[#091326]'
                     }`}
                   >
                     <div
@@ -368,7 +664,7 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
 
         {currentTab === 'history' && (
           <AuditTrailView
-            auditLog={state.auditLog}
+            auditLog={isPermissionDeclined ? [] : state.auditLog}
             profiles={state.profiles}
             myRole={myRole}
             theme={theme}
@@ -389,6 +685,7 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
             onToggleLogout={handleToggleLogout}
             onPushAppUpdate={onPushAppUpdate}
             onOpenSetup={() => onOpenSetup(myRole)}
+            onOpenInstallModal={onOpenInstallModal}
             theme={theme}
             onThemeModeChange={onThemeModeChange}
             currentThemeMode={currentThemeMode}
@@ -399,13 +696,17 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
       {/* COMPACT BOTTOM NAVIGATION BAR ("Settings" only) */}
       <nav
         className={`px-3 py-1.5 border-t flex items-center justify-around text-[10px] font-semibold z-10 ${
-          isDay
-            ? 'bg-white/95 border-slate-200'
-            : 'bg-[#091326]/95 border-slate-800'
+          isDay ? 'bg-white/95 border-slate-200' : 'bg-[#091326]/95 border-slate-800'
         }`}
       >
         <button
-          onClick={() => setCurrentTab('map')}
+          onClick={() => {
+            if (isPermissionDeclined) {
+              setShowDeclinedPopup(true);
+              return;
+            }
+            setCurrentTab('map');
+          }}
           className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition ${
             currentTab === 'map'
               ? 'text-[#3B82F6] dark:text-[#2DD4BF] bg-blue-500/10'
@@ -417,7 +718,13 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         </button>
 
         <button
-          onClick={() => setCurrentTab('history')}
+          onClick={() => {
+            if (isPermissionDeclined) {
+              setShowDeclinedPopup(true);
+              return;
+            }
+            setCurrentTab('history');
+          }}
           className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition ${
             currentTab === 'history'
               ? 'text-[#3B82F6] dark:text-[#2DD4BF] bg-blue-500/10'
@@ -441,9 +748,53 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         </button>
       </nav>
 
-      {/* FULL-SCREEN EAS URGENT ALERT MODAL */}
+      {/* POP-UP NOTIFICATION WHEN EMERGENCY OVERRIDE PERMISSION IS DECLINED */}
+      {showDeclinedPopup && (
+        <div className="absolute inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div
+            className={`w-full max-w-xs rounded-3xl p-5 border shadow-2xl text-center space-y-3.5 ${
+              isDay
+                ? 'bg-white border-slate-200 text-slate-900'
+                : 'bg-[#091326] border-slate-800 text-slate-100'
+            }`}
+          >
+            <div className="mx-auto w-11 h-11 rounded-2xl bg-rose-500/15 text-rose-500 flex items-center justify-center">
+              <Volume2 className="w-5 h-5" />
+            </div>
+            <p className="text-xs font-medium leading-relaxed font-['Inter',sans-serif]">
+              Haven will only work properly if the Emergency Alert Override setting is enabled.
+            </p>
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowDeclinedPopup(false)}
+                className={`flex-1 py-2 rounded-xl border text-xs font-semibold transition ${
+                  isDay
+                    ? 'border-slate-200 text-slate-600 hover:bg-slate-100'
+                    : 'border-slate-700 text-slate-300 hover:bg-slate-800'
+                }`}
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  unlockEmergencyAudioChannel();
+                  await onUpdateProfile(myRole, { criticalAlertsAllowed: true });
+                  setShowDeclinedPopup(false);
+                }}
+                className="flex-1 py-2 rounded-xl bg-gradient-to-r from-[#3B82F6] to-[#2563EB] text-white text-xs font-semibold shadow-sm transition"
+              >
+                Enable
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* FULL-SCREEN URGENT ALERT MODAL */}
       <EmergencyModal
-        emergency={state.activeEmergency}
+        emergency={isPermissionDeclined ? null : state.activeEmergency}
         myRole={myRole}
         profiles={state.profiles}
         onDismiss={() => onResolveEmergency(myRole)}

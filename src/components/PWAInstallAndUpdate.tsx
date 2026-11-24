@@ -7,6 +7,63 @@ interface BeforeInstallPromptEvent extends Event {
   userChoice: Promise<{ outcome: 'accepted' | 'dismissed'; platform: string }>;
 }
 
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; ++i) {
+    outputArray[i] = rawData.charCodeAt(i);
+  }
+  return outputArray;
+}
+
+/**
+ * Registers the device with the Web Push (VAPID) server so location check-ins
+ * and urgent alerts wake up the phone and display pop-up notifications even when
+ * the app is completely closed or the phone screen is off.
+ */
+export async function subscribeDeviceToWebPush(userId: UserRole): Promise<void> {
+  if (
+    typeof window === 'undefined' ||
+    !('serviceWorker' in navigator) ||
+    !('PushManager' in window)
+  ) {
+    return;
+  }
+
+  try {
+    if ('Notification' in window && Notification.permission === 'default') {
+      await Notification.requestPermission().catch(() => {});
+    }
+    if ('Notification' in window && Notification.permission !== 'granted') {
+      return;
+    }
+
+    const vapidRes = await fetch('/api/push-vapid-key');
+    if (!vapidRes.ok) return;
+    const { publicKey } = await vapidRes.json();
+    if (!publicKey) return;
+
+    const registration = await navigator.serviceWorker.ready;
+    let subscription = await registration.pushManager.getSubscription();
+    if (!subscription) {
+      subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: urlBase64ToUint8Array(publicKey) as unknown as BufferSource,
+      });
+    }
+
+    await fetch('/api/push-subscribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId, subscription }),
+    });
+  } catch {
+    // Graceful fallback if running in non-HTTPS or preview iframe
+  }
+}
+
 export function usePWAInstall() {
   const [deferredPrompt, setDeferredPrompt] = useState<BeforeInstallPromptEvent | null>(null);
   const [isInstalled, setIsInstalled] = useState(false);
@@ -130,20 +187,31 @@ interface DeviceUpdateBannerProps {
 
 /**
  * Per-device Over-The-Air (OTA) Update Notification Banner.
- * When a new app version/build is pushed by the publisher (or Service Worker detects an update),
- * the installed user sees a non-destructive "Update Available" banner on their device.
- * Accepting the update applies the new build while preserving 100% of user settings, names,
- * private nicknames, and permissions without requiring reinstallation.
+ * When a new app version/build is published or pushed, installed users see
+ * an "Accept Update" banner at the top of their app. Clicking it applies the new
+ * code bundle in-place while preserving 100% of their settings and device identity.
  */
 export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
   myRole,
   appRelease,
   isDay,
 }) => {
+  const CLIENT_CODE_VERSION = '1.3.0';
   const storageKey = `haven_installed_build_${myRole}`;
+  const codeVersionKey = `haven_code_version_${myRole}`;
+
   const [installedBuildId, setInstalledBuildId] = useState<number>(() => {
-    const saved = localStorage.getItem(storageKey);
-    return saved ? parseInt(saved, 10) : 1;
+    const currentServerBuild = appRelease?.buildId || 2;
+    const savedCodeVersion = localStorage.getItem(codeVersionKey);
+    const savedBuild = localStorage.getItem(storageKey);
+
+    // If the user is loading this code version for the first time, they already have this build loaded
+    if (savedCodeVersion !== CLIENT_CODE_VERSION || !savedBuild) {
+      localStorage.setItem(codeVersionKey, CLIENT_CODE_VERSION);
+      localStorage.setItem(storageKey, String(currentServerBuild));
+      return currentServerBuild;
+    }
+    return parseInt(savedBuild, 10);
   });
 
   const [swNeedRefresh, setSwNeedRefresh] = useState(false);
@@ -151,18 +219,47 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
   const [isUpdating, setIsUpdating] = useState(false);
   const [justUpdatedVersion, setJustUpdatedVersion] = useState<string | null>(null);
 
-  // Sync when myRole changes
   useEffect(() => {
-    const saved = localStorage.getItem(`haven_installed_build_${myRole}`);
-    setInstalledBuildId(saved ? parseInt(saved, 10) : 1);
+    const currentServerBuild = appRelease?.buildId || 2;
+    const savedCodeVersion = localStorage.getItem(`haven_code_version_${myRole}`);
+    const savedBuild = localStorage.getItem(`haven_installed_build_${myRole}`);
+
+    if (savedCodeVersion !== CLIENT_CODE_VERSION || !savedBuild) {
+      localStorage.setItem(`haven_code_version_${myRole}`, CLIENT_CODE_VERSION);
+      localStorage.setItem(`haven_installed_build_${myRole}`, String(currentServerBuild));
+      setInstalledBuildId(currentServerBuild);
+    } else {
+      setInstalledBuildId(parseInt(savedBuild, 10));
+    }
   }, [myRole]);
 
-  // Register Service Worker for real PWA OTA asset updates
+  // Register Service Worker in production and subscribe to background Web Push
   useEffect(() => {
     let mounted = true;
+    if (import.meta.env.DEV) {
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker
+          .getRegistrations()
+          .then((regs) => {
+            regs.forEach((reg) => reg.unregister().catch(() => {}));
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
     import('virtual:pwa-register')
       .then(({ registerSW }) => {
         const updateSW = registerSW({
+          onRegisteredSW(_swUrl, registration) {
+            subscribeDeviceToWebPush(myRole).catch(() => {});
+            if (registration) {
+              // Periodically check for new published code updates every 60s
+              setInterval(() => {
+                registration.update().catch(() => {});
+              }, 60 * 1000);
+            }
+          },
           onNeedRefresh() {
             if (mounted) {
               setSwNeedRefresh(true);
@@ -172,13 +269,11 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
           onOfflineReady() {},
         });
       })
-      .catch(() => {
-        // Fallback if SW registration is unavailable in restricted iframe
-      });
+      .catch(() => {});
     return () => {
       mounted = false;
     };
-  }, []);
+  }, [myRole]);
 
   const hasNewRelease = appRelease && appRelease.buildId > installedBuildId;
   const showUpdatePrompt = hasNewRelease || swNeedRefresh;
@@ -186,7 +281,6 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
   const handleAcceptUpdate = async () => {
     setIsUpdating(true);
     try {
-      // Preserve all existing localStorage settings; only advance installed build ID
       if (appRelease) {
         localStorage.setItem(storageKey, String(appRelease.buildId));
         localStorage.setItem(`haven_installed_version_${myRole}`, appRelease.version);
@@ -194,12 +288,15 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
       }
       if (swUpdateFn) {
         await swUpdateFn();
+      } else if ('serviceWorker' in navigator) {
+        const regs = await navigator.serviceWorker.getRegistrations();
+        await Promise.all(regs.map((r) => r.update().catch(() => {})));
       }
       setSwNeedRefresh(false);
       setJustUpdatedVersion(appRelease?.version || 'latest');
       setTimeout(() => {
         setJustUpdatedVersion(null);
-      }, 3500);
+      }, 3000);
     } finally {
       setIsUpdating(false);
     }
@@ -217,7 +314,7 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
         <div className="flex items-center gap-1.5 truncate">
           <Check className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
           <span className="truncate">
-            Updated to <strong>v{justUpdatedVersion}</strong> · Settings preserved
+            Updated to <strong>v{justUpdatedVersion}</strong> · New features applied
           </span>
         </div>
       </div>
@@ -246,7 +343,7 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
         disabled={isUpdating}
         className="px-2.5 py-1 rounded-lg bg-[#3B82F6] hover:bg-[#2563EB] text-white text-[10px] font-bold shrink-0 shadow-xs transition cursor-pointer"
       >
-        {isUpdating ? 'Updating...' : 'Accept Update'}
+        {isUpdating ? 'Applying...' : 'Accept Update'}
       </button>
     </div>
   );

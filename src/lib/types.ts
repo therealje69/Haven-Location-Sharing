@@ -54,18 +54,18 @@ export interface GoogleAuthProfile {
 export interface UserProfile {
   id: UserRole;
   name: string;
-  nicknameForPartner?: string; // Optional nickname I gave to my partner (private to my own phone only)
+  nicknameForPartner?: string;
   avatarColor: string;
   battery: number;
   isCharging: boolean;
   network: '5G' | 'LTE' | 'Wi-Fi' | 'Offline';
   lastSeen: number;
   currentLocation: LocationCoordinate;
-  isLoggedOut: boolean; // If true, location checks are blocked with friendly offline message
+  isLoggedOut: boolean;
   themeMode: ThemeMode;
   googleUser?: GoogleAuthProfile | null;
   hasCompletedSetup: boolean;
-  criticalAlertsAllowed?: boolean; // Full-volume Emergency Alert Override permission (Amber/Weather alert style)
+  criticalAlertsAllowed?: boolean;
 }
 
 export interface AppReleaseInfo {
@@ -103,13 +103,21 @@ export interface AppSyncState {
 }
 
 /**
+ * Returns true if the user has not set a custom name yet (empty or default "Name").
+ */
+export function isDefaultUnsetName(name?: string): boolean {
+  const trimmed = name?.trim();
+  return !trimmed || trimmed === 'Name';
+}
+
+/**
  * Formats a user's display name with optional partner nickname.
- * Example: `Jordan "The King"` or `Jordan`
  */
 export function formatPartnerDisplayName(realName: string, nickname?: string): string {
+  const baseName = isDefaultUnsetName(realName) ? 'Name' : realName.trim();
   const trimmedNick = nickname?.trim();
   if (trimmedNick) {
-    return `${realName} "${trimmedNick}"`;
+    return isDefaultUnsetName(realName) ? trimmedNick : `${baseName} "${trimmedNick}"`;
   }
-  return realName;
+  return baseName;
 }

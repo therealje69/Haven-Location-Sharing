@@ -1,8 +1,9 @@
 {
+  "schemaVersion": 3,
   "profiles": {
     "partner1": {
       "id": "partner1",
-      "name": "Jordan",
+      "name": "Name",
       "nicknameForPartner": "",
       "avatarColor": "amber",
       "battery": 88,
@@ -20,12 +21,12 @@
       "isLoggedOut": false,
       "themeMode": "day",
       "googleUser": null,
-      "hasCompletedSetup": true,
+      "hasCompletedSetup": false,
       "criticalAlertsAllowed": true
     },
     "partner2": {
       "id": "partner2",
-      "name": "Taylor",
+      "name": "Name",
       "nicknameForPartner": "",
       "avatarColor": "sage",
       "battery": 64,
@@ -43,7 +44,7 @@
       "isLoggedOut": false,
       "themeMode": "day",
       "googleUser": null,
-      "hasCompletedSetup": true,
+      "hasCompletedSetup": false,
       "criticalAlertsAllowed": true
     }
   },
@@ -112,9 +113,21 @@
     }
   ],
   "appRelease": {
-    "version": "1.2.1",
-    "buildId": 2,
-    "publishedAt": 1793906131916,
-    "releaseNotes": "Settings & alerts update"
+    "version": "1.3.0",
+    "buildId": 3,
+    "publishedAt": 1795070541755,
+    "releaseNotes": "8 daily check-ins, background alerts & new attention tone"
+  },
+  "androidConfig": {
+    "packageName": "app.haven.locationshare",
+    "sha256Fingerprint": "00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF"
+  },
+  "vapidKeys": {
+    "publicKey": "BE1aWyX68ir52ycL9txZQG7LlzbgxvOLUplsGg4LdqrlgpBLRXoBDm6l7mXxq5m5hzSDbYFHRLb4I94JQqUiUt4",
+    "privateKey": "-noU3-UZ9RENLTQvGnlMzNw-CJYoZdywMB4e71u-WeI"
+  },
+  "pushSubscriptions": {
+    "partner1": [],
+    "partner2": []
   }
 }

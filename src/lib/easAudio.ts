@@ -1,20 +1,20 @@
 /**
- * Emergency Alert System (EAS) & Notification Audio Synthesizer:
- * 1. Gentle Chime: Clear dual-harmonic chime for routine check-ins
- * 2. Full-Volume Emergency Siren: Maximum-output dual-tone (853 Hz + 960 Hz)
- *    Amber Alert / Severe Weather style attention signal with dynamic compression
- *    and pulsed cadence that plays at 100% hardware output.
+ * Haven Attention Chime & Hardware Full-Volume Alert Engine:
+ * 1. Routine Check-in Chime: Soft, warm two-note harmonic chime.
+ * 2. Urgent Attention Chime-Pulse: A commanding, non-grating harmonic triad pulse
+ *    (C5 -> E5 -> G5 -> C6) using smooth triangle + sine waves with dynamic compression
+ *    AND an HTML5 <audio> PCM WAV stream tied to navigator.mediaSession so it routes
+ *    through the hardware media/alarm output at 100% volume even when the screen is off
+ *    or another app is in the foreground.
  */
 
 let audioCtx: AudioContext | null = null;
-let osc1: OscillatorNode | null = null;
-let osc2: OscillatorNode | null = null;
-let osc3: OscillatorNode | null = null;
-let gainNode: GainNode | null = null;
-let compressorNode: DynamicsCompressorNode | null = null;
 let pulseInterval: number | null = null;
 let isPlaying = false;
 let audioUnlocked = false;
+let htmlAudioElement: HTMLAudioElement | null = null;
+let urgentWavDataUri: string | null = null;
+let wakeLockSentinel: any = null;
 
 function getAudioContext(): AudioContext {
   if (!audioCtx) {
@@ -30,25 +30,137 @@ function getAudioContext(): AudioContext {
 }
 
 /**
- * Pre-unlocks the Web Audio channel on any user interaction or permission approval
- * so incoming emergency alerts can sound immediately at full volume.
+ * Generates a 16-bit PCM WAV data URI containing the urgent 4-note harmonic chime-pulse
+ * at 100% normalized amplitude. Playing this via HTML5 <audio> routes audio through the
+ * OS media/alarm channel so it stays audible when the screen is off or backgrounded.
+ */
+function getUrgentChimeWavDataUri(): string {
+  if (urgentWavDataUri) return urgentWavDataUri;
+
+  const sampleRate = 22050;
+  const durationSeconds = 1.4;
+  const numSamples = Math.floor(sampleRate * durationSeconds);
+  const buffer = new ArrayBuffer(44 + numSamples * 2);
+  const view = new DataView(buffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  // WAV Header
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + numSamples * 2, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true); // PCM
+  view.setUint16(20, 1, true); // Linear PCM
+  view.setUint16(22, 1, true); // Mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, numSamples * 2, true);
+
+  // 4-note rising attention chime (C5 -> E5 -> G5 -> C6) + resonant hold
+  const notes = [
+    { freq: 523.25, start: 0.0, end: 0.22 },
+    { freq: 659.25, start: 0.2, end: 0.42 },
+    { freq: 783.99, start: 0.4, end: 0.64 },
+    { freq: 1046.5, start: 0.62, end: 1.15 },
+  ];
+
+  for (let i = 0; i < numSamples; i++) {
+    const t = i / sampleRate;
+    let sample = 0;
+
+    for (const n of notes) {
+      if (t >= n.start && t <= n.end) {
+        const localT = t - n.start;
+        const noteLen = n.end - n.start;
+        // Smooth attack & decay envelope (no clicks or harshness)
+        const attack = Math.min(1, localT / 0.018);
+        const release = Math.min(1, (noteLen - localT) / 0.06);
+        const env = attack * release;
+
+        // Warm fundamental + octave overtone (pleasant yet highly audible on phone speakers)
+        const fundamental = Math.sin(2 * Math.PI * n.freq * localT);
+        const overtone = 0.35 * Math.sin(2 * Math.PI * (n.freq * 2) * localT);
+        const fifth = 0.15 * Math.sin(2 * Math.PI * (n.freq * 1.5) * localT);
+
+        sample += (fundamental + overtone + fifth) * env * 0.72;
+      }
+    }
+
+    const clamped = Math.max(-0.98, Math.min(0.98, sample));
+    view.setInt16(44 + i * 2, Math.floor(clamped * 32767), true);
+  }
+
+  const bytes = new Uint8Array(buffer);
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  urgentWavDataUri = `data:audio/wav;base64,${btoa(binary)}`;
+  return urgentWavDataUri;
+}
+
+/**
+ * Pre-unlocks both the Web Audio Context and the HTML5 MediaSession <audio> channel
+ * so incoming background/lock-screen alerts sound at 100% volume immediately.
  */
 export function unlockEmergencyAudioChannel(): void {
-  if (audioUnlocked && audioCtx && audioCtx.state === 'running') return;
   try {
     const ctx = getAudioContext();
-    const buffer = ctx.createBuffer(1, 1, 22050);
-    const source = ctx.createBufferSource();
-    source.buffer = buffer;
-    source.connect(ctx.destination);
-    source.start(0);
-    audioUnlocked = true;
+    if (!audioUnlocked || ctx.state !== 'running') {
+      const buffer = ctx.createBuffer(1, 1, 22050);
+      const source = ctx.createBufferSource();
+      source.buffer = buffer;
+      source.connect(ctx.destination);
+      source.start(0);
+      audioUnlocked = true;
+    }
+
+    if (!htmlAudioElement && typeof Audio !== 'undefined') {
+      htmlAudioElement = new Audio(getUrgentChimeWavDataUri());
+      htmlAudioElement.loop = true;
+      htmlAudioElement.volume = 1.0;
+      htmlAudioElement.preload = 'auto';
+      // Prime and immediately pause so mobile OS whitelists this element for background playback
+      htmlAudioElement.muted = true;
+      htmlAudioElement
+        .play()
+        .then(() => {
+          if (htmlAudioElement && !isPlaying) {
+            htmlAudioElement.pause();
+            htmlAudioElement.currentTime = 0;
+            htmlAudioElement.muted = false;
+          }
+        })
+        .catch(() => {
+          if (htmlAudioElement) htmlAudioElement.muted = false;
+        });
+    }
+
+    // Request Screen WakeLock when available so phone stays responsive
+    if (typeof navigator !== 'undefined' && 'wakeLock' in navigator && !wakeLockSentinel) {
+      (navigator as any).wakeLock
+        .request('screen')
+        .then((sentinel: any) => {
+          wakeLockSentinel = sentinel;
+          sentinel.addEventListener('release', () => {
+            wakeLockSentinel = null;
+          });
+        })
+        .catch(() => {});
+    }
   } catch {
     // Will retry on next interaction
   }
 }
 
-// Automatically unlock audio context on first touch/click anywhere in the app
 if (typeof window !== 'undefined') {
   const autoUnlock = () => {
     unlockEmergencyAudioChannel();
@@ -58,106 +170,147 @@ if (typeof window !== 'undefined') {
 }
 
 /**
- * Plays a clear two-note chime (e.g. when a partner requests a routine check-in)
+ * Plays a soft two-note chime when a routine location check-in occurs.
  */
 export function playGentleChime(): void {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
 
-    // Note 1: E5 (659.25 Hz)
     const o1 = ctx.createOscillator();
     const g1 = ctx.createGain();
     o1.type = 'sine';
-    o1.frequency.setValueAtTime(659.25, now);
+    o1.frequency.setValueAtTime(587.33, now); // D5
     g1.gain.setValueAtTime(0, now);
-    g1.gain.linearRampToValueAtTime(0.22, now + 0.05);
-    g1.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    g1.gain.linearRampToValueAtTime(0.25, now + 0.04);
+    g1.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
     o1.connect(g1);
     g1.connect(ctx.destination);
     o1.start(now);
-    o1.stop(now + 0.75);
+    o1.stop(now + 0.7);
 
-    // Note 2: B5 (987.77 Hz)
     const o2 = ctx.createOscillator();
     const g2 = ctx.createGain();
     o2.type = 'sine';
-    o2.frequency.setValueAtTime(987.77, now + 0.15);
-    g2.gain.setValueAtTime(0, now + 0.15);
-    g2.gain.linearRampToValueAtTime(0.18, now + 0.2);
-    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.95);
+    o2.frequency.setValueAtTime(880.0, now + 0.14); // A5
+    g2.gain.setValueAtTime(0, now + 0.14);
+    g2.gain.linearRampToValueAtTime(0.22, now + 0.19);
+    g2.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
     o2.connect(g2);
     g2.connect(ctx.destination);
-    o2.start(now + 0.15);
-    o2.stop(now + 1.0);
+    o2.start(now + 0.14);
+    o2.stop(now + 0.95);
   } catch {
-    // Autoplay restrictions or unsupported
+    // Autoplay fallback
   }
 }
 
 /**
- * Starts the full-volume Emergency Alert System (EAS) siren.
- * Uses the standard 853 Hz + 960 Hz EAS dual-tone attention signal with
- * sawtooth/square harmonics and a DynamicsCompressorNode to drive 100% full output
- * like an Amber Alert / Flood Warning / Fire Warning.
+ * Plays a single cycle of the urgent harmonic attention chime on the Web Audio graph
+ * at 100% compressed output.
+ */
+function playUrgentHarmonicCycle(volume = 1.0): void {
+  try {
+    const ctx = getAudioContext();
+    const now = ctx.currentTime;
+    const maxVol = Math.max(0.9, Math.min(1.0, volume));
+
+    const compressor = ctx.createDynamicsCompressor();
+    compressor.threshold.setValueAtTime(-10, now);
+    compressor.knee.setValueAtTime(4, now);
+    compressor.ratio.setValueAtTime(10, now);
+    compressor.attack.setValueAtTime(0.003, now);
+    compressor.release.setValueAtTime(0.12, now);
+    compressor.connect(ctx.destination);
+
+    // 4-note rising attention triad (C5 -> E5 -> G5 -> C6)
+    const sequence = [
+      { freq: 523.25, offset: 0.0, dur: 0.22 },
+      { freq: 659.25, offset: 0.2, dur: 0.22 },
+      { freq: 783.99, offset: 0.4, dur: 0.24 },
+      { freq: 1046.5, offset: 0.62, dur: 0.52 },
+    ];
+
+    for (const step of sequence) {
+      const start = now + step.offset;
+      const stop = start + step.dur;
+
+      const oscMain = ctx.createOscillator();
+      const oscHarmonic = ctx.createOscillator();
+      const noteGain = ctx.createGain();
+
+      // Triangle + Sine produces a warm, clear, non-grating chime that projects strongly
+      oscMain.type = 'triangle';
+      oscHarmonic.type = 'sine';
+
+      oscMain.frequency.setValueAtTime(step.freq, start);
+      oscHarmonic.frequency.setValueAtTime(step.freq * 2, start);
+
+      noteGain.gain.setValueAtTime(0.001, start);
+      noteGain.gain.linearRampToValueAtTime(maxVol, start + 0.02);
+      noteGain.gain.setValueAtTime(maxVol * 0.9, stop - 0.06);
+      noteGain.gain.exponentialRampToValueAtTime(0.001, stop);
+
+      oscMain.connect(noteGain);
+      oscHarmonic.connect(noteGain);
+      noteGain.connect(compressor);
+
+      oscMain.start(start);
+      oscHarmonic.start(start);
+      oscMain.stop(stop + 0.02);
+      oscHarmonic.stop(stop + 0.02);
+    }
+  } catch (err) {
+    console.warn('WebAudio attention cycle error:', err);
+  }
+}
+
+/**
+ * Starts the full-volume Urgent Attention Chime-Pulse.
+ *Simultaneously drives Web Audio API + HTML5 <audio> MediaSession stream at 100% gain
+ * so it sounds even when the phone is backgrounded or the screen is off.
  */
 export function startEASSiren(volume = 1.0): void {
   if (isPlaying) return;
+  isPlaying = true;
 
   try {
-    const ctx = getAudioContext();
-    const maxVolume = Math.max(0.85, Math.min(1.0, volume));
+    // 1. Start HTML5 <audio> MediaSession loop (penetrates background / lock screen)
+    if (!htmlAudioElement && typeof Audio !== 'undefined') {
+      htmlAudioElement = new Audio(getUrgentChimeWavDataUri());
+    }
+    if (htmlAudioElement) {
+      htmlAudioElement.muted = false;
+      htmlAudioElement.volume = 1.0;
+      htmlAudioElement.loop = true;
+      htmlAudioElement.currentTime = 0;
+      htmlAudioElement.play().catch(() => {});
+    }
 
-    // Dynamic compressor to maximize perceived loudness at 100% ceiling without clipping distortion
-    compressorNode = ctx.createDynamicsCompressor();
-    compressorNode.threshold.setValueAtTime(-12, ctx.currentTime);
-    compressorNode.knee.setValueAtTime(6, ctx.currentTime);
-    compressorNode.ratio.setValueAtTime(12, ctx.currentTime);
-    compressorNode.attack.setValueAtTime(0.002, ctx.currentTime);
-    compressorNode.release.setValueAtTime(0.15, ctx.currentTime);
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.metadata = new MediaMetadata({
+          title: 'Urgent Check-in Alert',
+          artist: 'Haven',
+          album: 'Critical Alert Override',
+        });
+        navigator.mediaSession.playbackState = 'playing';
+      } catch {}
+    }
 
-    gainNode = ctx.createGain();
-    gainNode.gain.setValueAtTime(maxVolume, ctx.currentTime);
-
-    osc1 = ctx.createOscillator();
-    osc2 = ctx.createOscillator();
-    osc3 = ctx.createOscillator();
-
-    // Sawtooth + Square wave combination produces the unmistakable piercing EAS Amber Alert timbre
-    osc1.type = 'sawtooth';
-    osc2.type = 'square';
-    osc3.type = 'sawtooth';
-
-    osc1.frequency.setValueAtTime(853, ctx.currentTime);
-    osc2.frequency.setValueAtTime(960, ctx.currentTime);
-    osc3.frequency.setValueAtTime(1706, ctx.currentTime); // Upper harmonic for small phone speakers
-
-    osc1.connect(gainNode);
-    osc2.connect(gainNode);
-    osc3.connect(gainNode);
-    gainNode.connect(compressorNode);
-    compressorNode.connect(ctx.destination);
-
-    osc1.start();
-    osc2.start();
-    osc3.start();
-    isPlaying = true;
-
-    // Alternating Amber Alert / EAS cadence (pulsed high-urgency pattern)
-    let highPhase = true;
+    // 2. Start Web Audio API compressed chime-pulse loop
+    playUrgentHarmonicCycle(volume);
     pulseInterval = window.setInterval(() => {
-      if (!gainNode || !audioCtx || !isPlaying) return;
-      const t = audioCtx.currentTime;
-      highPhase = !highPhase;
-      gainNode.gain.setValueAtTime(highPhase ? maxVolume : maxVolume * 0.25, t);
-    }, 450);
+      if (!isPlaying) return;
+      playUrgentHarmonicCycle(volume);
+    }, 1400);
   } catch (err) {
     console.warn('Emergency audio playback failed:', err);
   }
 }
 
 /**
- * Stops the emergency siren immediately and cleans up nodes.
+ * Stops the urgent attention chime immediately.
  */
 export function stopEASSiren(): void {
   if (pulseInterval !== null) {
@@ -165,42 +318,27 @@ export function stopEASSiren(): void {
     pulseInterval = null;
   }
 
-  if (!isPlaying) return;
+  isPlaying = false;
 
   try {
-    if (gainNode && audioCtx) {
-      gainNode.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    if (htmlAudioElement) {
+      htmlAudioElement.pause();
+      htmlAudioElement.currentTime = 0;
     }
-    if (osc1) {
-      try { osc1.stop(); osc1.disconnect(); } catch {}
-      osc1 = null;
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      try {
+        navigator.mediaSession.playbackState = 'none';
+      } catch {}
     }
-    if (osc2) {
-      try { osc2.stop(); osc2.disconnect(); } catch {}
-      osc2 = null;
-    }
-    if (osc3) {
-      try { osc3.stop(); osc3.disconnect(); } catch {}
-      osc3 = null;
-    }
-    if (gainNode) {
-      try { gainNode.disconnect(); } catch {}
-      gainNode = null;
-    }
-    if (compressorNode) {
-      try { compressorNode.disconnect(); } catch {}
-      compressorNode = null;
-    }
-    isPlaying = false;
   } catch {
-    isPlaying = false;
+    // ignore
   }
 }
 
 /**
- * Plays a full-volume preview test sound of the emergency siren.
+ * Plays a full-volume preview of the new Urgent Attention Chime-Pulse.
  */
-export function playEASPreview(durationMs = 2000): Promise<void> {
+export function playEASPreview(durationMs = 2600): Promise<void> {
   unlockEmergencyAudioChannel();
   return new Promise((resolve) => {
     startEASSiren(1.0);

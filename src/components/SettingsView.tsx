@@ -1,6 +1,13 @@
 import React, { useState, useEffect } from 'react';
-import { AppReleaseInfo, GoogleAuthProfile, ThemeMode, UserProfile, UserRole, formatPartnerDisplayName } from '../lib/types.js';
-import { formatRefreshTime } from '../lib/tokenEngine.js';
+import {
+  AppReleaseInfo,
+  GoogleAuthProfile,
+  ThemeMode,
+  UserProfile,
+  UserRole,
+  isDefaultUnsetName,
+} from '../lib/types.js';
+import { formatRefreshTime, MAX_DAILY_TOKENS } from '../lib/tokenEngine.js';
 import { playEASPreview, unlockEmergencyAudioChannel } from '../lib/easAudio.js';
 import {
   User,
@@ -14,7 +21,6 @@ import {
   Clock,
   ShieldCheck,
   RefreshCw,
-  Lock
 } from 'lucide-react';
 
 interface SettingsViewProps {
@@ -29,6 +35,7 @@ interface SettingsViewProps {
   onToggleLogout: (loggedOut: boolean) => Promise<void>;
   onPushAppUpdate: () => Promise<void>;
   onOpenSetup: () => void;
+  onOpenInstallModal?: () => void;
   theme: 'day' | 'night';
   onThemeModeChange: (mode: ThemeMode) => void;
   currentThemeMode: ThemeMode;
@@ -37,7 +44,6 @@ interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   myRole,
   myProfile,
-  partnerProfile,
   tokensRemaining,
   msUntilRefresh,
   appRelease,
@@ -46,30 +52,31 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   onToggleLogout,
   onPushAppUpdate,
   onOpenSetup,
+  onOpenInstallModal,
   theme,
   onThemeModeChange,
   currentThemeMode,
 }) => {
   const isDay = theme === 'day';
 
-  const [name, setName] = useState(myProfile.name);
+  const [name, setName] = useState(() =>
+    isDefaultUnsetName(myProfile.name) ? '' : myProfile.name
+  );
   const [nickname, setNickname] = useState(myProfile.nicknameForPartner || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [testToneActive, setTestToneActive] = useState(false);
   const [resetSuccess, setResetSuccess] = useState(false);
   const [pushSuccess, setPushSuccess] = useState(false);
 
-  // Strictly synchronize local form inputs when switching devices or when this device's profile updates
   useEffect(() => {
-    setName(myProfile.name);
+    setName(isDefaultUnsetName(myProfile.name) ? '' : myProfile.name);
     setNickname(myProfile.nicknameForPartner || '');
   }, [myRole, myProfile.name, myProfile.nicknameForPartner]);
 
   const handleSaveNames = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!name.trim()) return;
     await onUpdateProfile(myRole, {
-      name: name.trim(),
+      name: name.trim() || 'Name',
       nicknameForPartner: nickname.trim(),
     });
     setSavedSuccess(true);
@@ -77,8 +84,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const handleToggleCriticalAlerts = async () => {
-    unlockEmergencyAudioChannel();
     const nextVal = !(myProfile.criticalAlertsAllowed ?? true);
+    if (nextVal) {
+      unlockEmergencyAudioChannel();
+    }
     await onUpdateProfile(myRole, { criticalAlertsAllowed: nextVal });
   };
 
@@ -86,9 +95,10 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     if (myProfile.googleUser) {
       await onUpdateProfile(myRole, { googleUser: null });
     } else {
+      const base = isDefaultUnsetName(myProfile.name) ? 'user' : myProfile.name;
       const mockGoogle: GoogleAuthProfile = {
-        email: `${myProfile.name.toLowerCase().replace(/\s+/g, '')}@gmail.com`,
-        name: myProfile.name,
+        email: `${base.toLowerCase().replace(/\s+/g, '')}@gmail.com`,
+        name: base,
         picture: 'https://lh3.googleusercontent.com/a/default-user',
       };
       await onUpdateProfile(myRole, { googleUser: mockGoogle });
@@ -103,7 +113,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
   const handleTestTone = async () => {
     setTestToneActive(true);
-    await playEASPreview(1800);
+    await playEASPreview(2400);
     setTestToneActive(false);
   };
 
@@ -113,13 +123,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     setTimeout(() => setPushSuccess(false), 2500);
   };
 
-  const previewPartnerDisplay = formatPartnerDisplayName(partnerProfile.name, nickname);
   const criticalEnabled = myProfile.criticalAlertsAllowed ?? true;
 
   return (
     <div className="h-full flex flex-col justify-between py-1 text-xs select-none overflow-y-auto no-scrollbar">
       <div className="space-y-2.5">
-        {/* 1. Daily Check-in Balance (5 daily allowance) */}
+        {/* 1. Daily Check-in Balance (8 daily allowance) */}
         <div
           className={`p-3 rounded-2xl border ${
             isDay ? 'bg-white border-slate-200' : 'bg-[#091326] border-slate-800'
@@ -128,16 +137,22 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between mb-1">
             <div className="flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-[#2DD4BF]"></span>
-              <span className="font-bold tracking-tight text-xs font-['JetBrains_Mono',monospace]">Daily Check-ins</span>
+              <span className="font-bold tracking-tight text-xs font-['JetBrains_Mono',monospace]">
+                Daily Check-ins
+              </span>
             </div>
             <span className="font-mono text-xs font-bold text-[#3B82F6] dark:text-[#2DD4BF]">
-              {tokensRemaining} of 5 ready
+              {tokensRemaining} of {MAX_DAILY_TOKENS} ready
             </span>
           </div>
           <div className="flex items-center justify-between text-[11px] text-slate-500">
             <span className="flex items-center gap-1 font-['Inter',sans-serif]">
               <Clock className="w-3 h-3 text-slate-400" />
-              <span>{tokensRemaining === 5 ? 'Full allowance available' : `Next ready: ${formatRefreshTime(msUntilRefresh)}`}</span>
+              <span>
+                {tokensRemaining === MAX_DAILY_TOKENS
+                  ? 'Full allowance available'
+                  : `Next ready: ${formatRefreshTime(msUntilRefresh)}`}
+              </span>
             </span>
             <button
               onClick={handleResetTokensClick}
@@ -148,7 +163,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 2. Per-Device Name & Private Partner Nickname */}
+        {/* 2. Minimal Naming Area */}
         <form
           onSubmit={handleSaveNames}
           className={`p-3 rounded-2xl border space-y-2 ${
@@ -158,26 +173,34 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5 font-bold text-xs font-['JetBrains_Mono',monospace]">
               <User className="w-3.5 h-3.5 text-[#3B82F6]" />
-              <span>Your Identity & Nickname</span>
+              <span>Profile</span>
             </div>
-            {savedSuccess && (
-              <span className="text-[10px] text-emerald-600 font-bold flex items-center gap-1">
-                <Check className="w-3 h-3" /> Saved on your device
-              </span>
-            )}
+            <div className="flex items-center gap-2">
+              {savedSuccess && (
+                <span className="text-[10px] text-emerald-600 font-bold flex items-center gap-1">
+                  <Check className="w-3 h-3" /> Saved
+                </span>
+              )}
+              <button
+                type="submit"
+                className="px-2.5 py-1 rounded-lg bg-[#3B82F6] hover:bg-[#2563EB] text-white font-semibold text-[10px] transition shrink-0"
+              >
+                Save
+              </button>
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-[10px] font-medium text-slate-500 block mb-0.5 truncate">
-                Your Name (only you can edit):
+                Your Name
               </label>
               <input
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
-                placeholder="Your name"
-                className={`w-full px-2.5 py-1.5 rounded-lg border text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500 ${
+                placeholder="Name"
+                className={`w-full px-2.5 py-1.5 rounded-lg border text-xs font-semibold placeholder:text-slate-400/50 focus:outline-none focus:ring-1 focus:ring-blue-500 ${
                   isDay
                     ? 'bg-slate-50 border-slate-200 text-slate-900'
                     : 'bg-slate-950 border-slate-800 text-slate-100'
@@ -187,14 +210,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 
             <div>
               <label className="text-[10px] font-medium text-slate-500 block mb-0.5 truncate">
-                Nickname for {partnerProfile.name}:
+                Nickname
               </label>
               <input
                 type="text"
                 value={nickname}
                 onChange={(e) => setNickname(e.target.value)}
-                placeholder='Optional (e.g. The King)'
-                className={`w-full px-2.5 py-1.5 rounded-lg border text-xs font-semibold focus:outline-none focus:ring-1 focus:ring-blue-500 ${
+                placeholder="Optional"
+                className={`w-full px-2.5 py-1.5 rounded-lg border text-xs font-semibold placeholder:text-slate-400/50 focus:outline-none focus:ring-1 focus:ring-blue-500 ${
                   isDay
                     ? 'bg-slate-50 border-slate-200 text-slate-900'
                     : 'bg-slate-950 border-slate-800 text-slate-100'
@@ -202,25 +225,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               />
             </div>
           </div>
-
-          <div className="flex items-center justify-between pt-0.5 text-[10px] text-slate-400 gap-2">
-            <div className="truncate">
-              <span>Partner on your screen: </span>
-              <strong className="text-slate-700 dark:text-slate-300">{previewPartnerDisplay}</strong>
-              <span className="inline-flex items-center gap-0.5 ml-1 text-[9px] text-slate-400">
-                (<Lock className="w-2.5 h-2.5 inline" /> {partnerProfile.name}'s name is locked to their phone)
-              </span>
-            </div>
-            <button
-              type="submit"
-              className="px-2.5 py-1 rounded-lg bg-[#3B82F6] hover:bg-[#2563EB] text-white font-semibold text-[10px] transition shrink-0"
-            >
-              Save
-            </button>
-          </div>
         </form>
 
-        {/* 3. Critical Emergency Siren Override (100% Full Volume like Amber/Weather Alerts) */}
+        {/* 3. Emergency Alert Override */}
         <div
           className={`p-3 rounded-2xl border space-y-2 ${
             isDay ? 'bg-white border-slate-200' : 'bg-[#091326] border-slate-800'
@@ -229,7 +236,9 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-1.5">
               <Volume2 className="w-3.5 h-3.5 text-rose-500" />
-              <span className="font-bold text-xs font-['JetBrains_Mono',monospace]">Critical Alert Override</span>
+              <span className="font-bold text-xs font-['JetBrains_Mono',monospace]">
+                Emergency Alert Override
+              </span>
             </div>
             <button
               type="button"
@@ -240,13 +249,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   : 'bg-slate-200 dark:bg-slate-800 text-slate-500'
               }`}
             >
-              {criticalEnabled ? '100% Full Volume ON' : 'Muted'}
+              {criticalEnabled ? 'Enabled' : 'Disabled'}
             </button>
           </div>
           <div className="flex items-center justify-between text-[10px] text-slate-500 gap-2">
-            <span className="truncate">
-              Plays urgent siren at full volume (Amber/Weather alert style).
-            </span>
+            <span className="truncate">Full-volume attention tone & lock-screen alert</span>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 type="button"
@@ -260,7 +267,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                 onClick={handleTestTone}
                 className="text-rose-600 dark:text-rose-400 font-semibold hover:underline"
               >
-                {testToneActive ? 'Playing...' : 'Test Siren'}
+                {testToneActive ? 'Playing...' : 'Test Tone'}
               </button>
             </div>
           </div>
@@ -323,21 +330,30 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <div className="min-w-0">
             <div className="font-bold text-xs font-['JetBrains_Mono',monospace] flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-[#2DD4BF] shrink-0" />
-              <span>Haven v{appRelease?.version || '1.2.0'}</span>
+              <span>Haven v{appRelease?.version || '1.3.0'}</span>
             </div>
             <div className="text-[10px] text-slate-500 truncate">
-              OTA updates preserve all settings without reinstalling
+              OTA updates apply directly to installed app
             </div>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
+            {onOpenInstallModal && (
+              <button
+                type="button"
+                onClick={onOpenInstallModal}
+                className="px-2 py-1 rounded-lg bg-gradient-to-r from-[#3B82F6] to-[#2563EB] text-white text-[10px] font-semibold transition shadow-xs"
+              >
+                Install / APK
+              </button>
+            )}
             <button
               type="button"
               onClick={handlePushUpdateClick}
               className="px-2 py-1 rounded-lg border border-blue-500/30 bg-blue-500/10 text-[#3B82F6] dark:text-[#2DD4BF] text-[10px] font-semibold flex items-center gap-1 hover:bg-blue-500/20 transition"
             >
               <RefreshCw className="w-3 h-3" />
-              <span>{pushSuccess ? 'Update Pushed!' : 'Push OTA Update'}</span>
+              <span>{pushSuccess ? 'Pushed!' : 'OTA Update'}</span>
             </button>
             <button
               type="button"
@@ -345,7 +361,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               className={`px-2 py-1 rounded-lg text-[10px] font-semibold transition ${
                 myProfile.googleUser
                   ? 'border border-slate-300 dark:border-slate-700 text-slate-500'
-                  : 'bg-[#3B82F6] text-white'
+                  : 'border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300'
               }`}
             >
               {myProfile.googleUser ? 'Linked' : 'Google'}
@@ -367,12 +383,12 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           {myProfile.isLoggedOut ? (
             <>
               <LogIn className="w-3.5 h-3.5" />
-              <span>Log Back In (Ready for Check-ins)</span>
+              <span>Log Back In</span>
             </>
           ) : (
             <>
               <LogOut className="w-3.5 h-3.5 text-slate-400" />
-              <span>Log Out (Pause Location Requests)</span>
+              <span>Log Out</span>
             </>
           )}
         </button>
