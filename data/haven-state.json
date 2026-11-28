@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "profiles": {
     "partner1": {
       "id": "partner1",
@@ -48,8 +48,105 @@
       "criticalAlertsAllowed": true
     }
   },
-  "pings": [],
+  "pings": [
+    {
+      "id": "ping-1795577489676-iruq4",
+      "requesterId": "partner1",
+      "targetId": "partner2",
+      "timestamp": 1795577489675,
+      "expiresAt": 1795577549675,
+      "type": "standard",
+      "location": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "accuracy": 12,
+        "address": "Mission Dolores Park, 19th & Dolores St",
+        "city": "San Francisco, CA",
+        "timestamp": 1793905616514
+      }
+    },
+    {
+      "id": "ping-1795577808874-czrej",
+      "requesterId": "partner1",
+      "targetId": "partner2",
+      "timestamp": 1795577808874,
+      "expiresAt": 1795577868874,
+      "type": "standard",
+      "location": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "accuracy": 12,
+        "address": "Mission Dolores Park, 19th & Dolores St",
+        "city": "San Francisco, CA",
+        "timestamp": 1793905616514
+      }
+    },
+    {
+      "id": "ping-1795578000583-60084",
+      "requesterId": "partner1",
+      "targetId": "partner2",
+      "timestamp": 1795578000583,
+      "expiresAt": 1795578060583,
+      "type": "standard",
+      "location": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "accuracy": 12,
+        "address": "Mission Dolores Park, 19th & Dolores St",
+        "city": "San Francisco, CA",
+        "timestamp": 1793905616514
+      }
+    }
+  ],
   "auditLog": [
+    {
+      "id": "audit-1795578000583-lnmnz",
+      "timestamp": 1795578000583,
+      "type": "standard_ping",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Location Viewed",
+      "message": "Name viewed Name's location.",
+      "tokensRemainingAfter": 5,
+      "ephemeralSeconds": 120,
+      "locationSnapshot": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "approxAddress": "Mission Dolores Park, 19th & Dolores St"
+      }
+    },
+    {
+      "id": "audit-1795577808874-4bb91",
+      "timestamp": 1795577808874,
+      "type": "standard_ping",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Location Viewed",
+      "message": "Name viewed Name's location.",
+      "tokensRemainingAfter": 6,
+      "ephemeralSeconds": 120,
+      "locationSnapshot": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "approxAddress": "Mission Dolores Park, 19th & Dolores St"
+      }
+    },
+    {
+      "id": "audit-1795577489676-hzlus",
+      "timestamp": 1795577489675,
+      "type": "standard_ping",
+      "actor": "partner1",
+      "target": "partner2",
+      "title": "Location Viewed",
+      "message": "Name viewed Name's location.",
+      "tokensRemainingAfter": 7,
+      "ephemeralSeconds": 120,
+      "locationSnapshot": {
+        "lat": 37.7596,
+        "lng": -122.4269,
+        "approxAddress": "Mission Dolores Park, 19th & Dolores St"
+      }
+    },
     {
       "id": "audit-reset-1793906262405",
       "timestamp": 1793906262405,
@@ -113,10 +210,10 @@
     }
   ],
   "appRelease": {
-    "version": "1.3.0",
-    "buildId": 3,
-    "publishedAt": 1795070541755,
-    "releaseNotes": "8 daily check-ins, background alerts & new attention tone"
+    "version": "1.4.0",
+    "buildId": 4,
+    "publishedAt": 1795577456320,
+    "releaseNotes": "Google Maps addresses, heads-up alerts & 25-event history in Settings"
   },
   "androidConfig": {
     "packageName": "app.haven.locationshare",

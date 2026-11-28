@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { UserRole, isDefaultUnsetName } from '../lib/types.js';
 import { HavenLogoIcon } from './HavenLogo.js';
 import { unlockEmergencyAudioChannel } from '../lib/easAudio.js';
+import { subscribeDeviceToWebPush } from './PWAInstallAndUpdate.js';
 import { MapPin, Bell, Volume2, ArrowRight, Check } from 'lucide-react';
 
 interface OnboardingModalProps {
@@ -15,6 +16,7 @@ interface OnboardingModalProps {
 }
 
 export const OnboardingModal: React.FC<OnboardingModalProps> = ({
+  myRole,
   defaultName,
   defaultNickname = '',
   onComplete,
@@ -53,6 +55,9 @@ export const OnboardingModal: React.FC<OnboardingModalProps> = ({
         Notification.permission === 'default'
       ) {
         await Notification.requestPermission().catch(() => {});
+      }
+      if (notificationsAllowed && finalCriticalAllowed) {
+        subscribeDeviceToWebPush(myRole).catch(() => {});
       }
       await onComplete(finalName, nickname.trim(), finalCriticalAllowed);
     } finally {

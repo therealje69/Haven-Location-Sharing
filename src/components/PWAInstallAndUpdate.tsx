@@ -196,12 +196,12 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
   appRelease,
   isDay,
 }) => {
-  const CLIENT_CODE_VERSION = '1.3.0';
+  const CLIENT_CODE_VERSION = '1.4.0';
   const storageKey = `haven_installed_build_${myRole}`;
   const codeVersionKey = `haven_code_version_${myRole}`;
 
   const [installedBuildId, setInstalledBuildId] = useState<number>(() => {
-    const currentServerBuild = appRelease?.buildId || 2;
+    const currentServerBuild = appRelease?.buildId || 3;
     const savedCodeVersion = localStorage.getItem(codeVersionKey);
     const savedBuild = localStorage.getItem(storageKey);
 
@@ -220,7 +220,7 @@ export const DeviceUpdateBanner: React.FC<DeviceUpdateBannerProps> = ({
   const [justUpdatedVersion, setJustUpdatedVersion] = useState<string | null>(null);
 
   useEffect(() => {
-    const currentServerBuild = appRelease?.buildId || 2;
+    const currentServerBuild = appRelease?.buildId || 3;
     const savedCodeVersion = localStorage.getItem(`haven_code_version_${myRole}`);
     const savedBuild = localStorage.getItem(`haven_installed_build_${myRole}`);
 

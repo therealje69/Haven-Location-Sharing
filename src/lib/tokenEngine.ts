@@ -250,6 +250,7 @@ export function createAuditLogEntry(params: {
           lat: location.lat,
           lng: location.lng,
           approxAddress: location.address || location.city,
+          placeId: location.placeId,
         }
       : undefined,
   };

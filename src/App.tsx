@@ -273,13 +273,6 @@ export default function App() {
     }
   };
 
-  const handleResetTokens = async () => {
-    try {
-      await fetch('/api/reset-demo', { method: 'POST' });
-    } catch (err) {
-      console.error(err);
-    }
-  };
 
   const handlePushAppUpdate = async () => {
     try {
@@ -481,7 +474,6 @@ export default function App() {
               onTriggerEmergency={handleTriggerEmergency}
               onResolveEmergency={handleResolveEmergency}
               onUpdateProfile={handleUpdateProfile}
-              onResetTokens={handleResetTokens}
               onPushAppUpdate={handlePushAppUpdate}
               onOpenSetup={(role) => setOnboardingRole(role)}
               onOpenInstallModal={() => setShowInstallModal(true)}
@@ -657,7 +649,6 @@ export default function App() {
                     onTriggerEmergency={handleTriggerEmergency}
                     onResolveEmergency={handleResolveEmergency}
                     onUpdateProfile={handleUpdateProfile}
-                    onResetTokens={handleResetTokens}
                     onPushAppUpdate={handlePushAppUpdate}
                     onOpenSetup={(role) => setOnboardingRole(role)}
                     onOpenInstallModal={() => setShowInstallModal(true)}
@@ -685,7 +676,6 @@ export default function App() {
                     onTriggerEmergency={handleTriggerEmergency}
                     onResolveEmergency={handleResolveEmergency}
                     onUpdateProfile={handleUpdateProfile}
-                    onResetTokens={handleResetTokens}
                     onPushAppUpdate={handlePushAppUpdate}
                     onOpenSetup={(role) => setOnboardingRole(role)}
                     onOpenInstallModal={() => setShowInstallModal(true)}
@@ -707,7 +697,6 @@ export default function App() {
                   onTriggerEmergency={handleTriggerEmergency}
                   onResolveEmergency={handleResolveEmergency}
                   onUpdateProfile={handleUpdateProfile}
-                  onResetTokens={handleResetTokens}
                   onPushAppUpdate={handlePushAppUpdate}
                   onOpenSetup={(role) => setOnboardingRole(role)}
                   onOpenInstallModal={() => setShowInstallModal(true)}

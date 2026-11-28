@@ -17,6 +17,7 @@ import type {
   UserRole,
 } from './src/lib/types.ts';
 import { formatPartnerDisplayName } from './src/lib/types.ts';
+import { isRawCoordinateString } from './src/lib/locationUtils.ts';
 import {
   calculateTokenStatus,
   canRequestLocation,
@@ -38,7 +39,158 @@ app.use(express.json());
 
 const DATA_DIR = path.resolve(__dirname, 'data');
 const STATE_FILE = path.resolve(DATA_DIR, 'haven-state.json');
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 4;
+
+// Server-side reverse geocoding cache (24h TTL — well within Google Maps 30-day limit)
+interface ReverseGeocodeResult {
+  address: string;
+  city: string;
+  placeId?: string;
+  cachedAt: number;
+}
+const reverseGeocodeCache = new Map<string, ReverseGeocodeResult>();
+const GEOCODE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function getGoogleMapsApiKey(): string {
+  return process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '';
+}
+
+function extractCityFromComponents(
+  components: Array<{ longText?: string; shortText?: string; long_name?: string; short_name?: string; types?: string[] }> | undefined
+): string {
+  if (!Array.isArray(components)) return '';
+  const find = (type: string) => components.find((c) => Array.isArray(c.types) && c.types.includes(type));
+  const locality = find('locality') || find('sublocality') || find('neighborhood');
+  const admin1 = find('administrative_area_level_1');
+  const cityText = locality?.longText || locality?.long_name || '';
+  const stateText = admin1?.shortText || admin1?.short_name || '';
+  if (cityText && stateText) return `${cityText}, ${stateText}`;
+  return cityText || stateText || '';
+}
+
+/**
+ * Resolves latitude/longitude coordinates into a human-readable Google Maps street/place address
+ * via server-side Geocoding REST API (avoids browser CORS trap & deprecated JS Geocoder).
+ */
+async function reverseGeocodeCoordinates(
+  lat: number,
+  lng: number
+): Promise<{ address: string; city: string; placeId?: string; quotaExceeded?: boolean } | null> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  const cacheKey = `${lat.toFixed(4)},${lng.toFixed(4)}`;
+  const cached = reverseGeocodeCache.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < GEOCODE_CACHE_TTL_MS) {
+    return { address: cached.address, city: cached.city, placeId: cached.placeId };
+  }
+
+  const apiKey = getGoogleMapsApiKey();
+  if (!apiKey) return null;
+
+  // 1. Primary: Google Maps Geocoding API v4 (structured location endpoint)
+  try {
+    const v4Url = new URL('https://geocode.googleapis.com/v4/geocode/location');
+    v4Url.searchParams.set('location.latitude', String(lat));
+    v4Url.searchParams.set('location.longitude', String(lng));
+    v4Url.searchParams.set('languageCode', 'en');
+
+    const v4Res = await fetch(v4Url.toString(), {
+      method: 'GET',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Goog-Api-Key': apiKey,
+        'X-Goog-FieldMask': 'results.placeId,results.formattedAddress,results.addressComponents,plusCode',
+        'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
+      },
+    });
+
+    if (v4Res.status === 429) {
+      return { address: '', city: '', quotaExceeded: true };
+    }
+
+    if (v4Res.ok) {
+      const data: any = await v4Res.json();
+      const top = Array.isArray(data?.results) ? data.results[0] : null;
+      const formatted = typeof top?.formattedAddress === 'string' ? top.formattedAddress.trim() : '';
+      if (formatted && !isRawCoordinateString(formatted)) {
+        const city = extractCityFromComponents(top?.addressComponents);
+        const placeId = typeof top?.placeId === 'string' ? top.placeId : undefined;
+        reverseGeocodeCache.set(cacheKey, {
+          address: formatted,
+          city,
+          placeId,
+          cachedAt: Date.now(),
+        });
+        return { address: formatted, city, placeId };
+      }
+    }
+  } catch {
+    // Fall through to standard Geocoding REST endpoint
+  }
+
+  // 2. Fallback: Geocoding REST endpoint (maps.googleapis.com/maps/api/geocode/json)
+  try {
+    const legacyRestUrl = new URL('https://maps.googleapis.com/maps/api/geocode/json');
+    legacyRestUrl.searchParams.set('latlng', `${lat},${lng}`);
+    legacyRestUrl.searchParams.set('language', 'en');
+    legacyRestUrl.searchParams.set('key', apiKey);
+
+    const restRes = await fetch(legacyRestUrl.toString(), {
+      method: 'GET',
+      headers: {
+        'X-Goog-Maps-Solution-ID': 'gmp_mcp_codeassist_v1_aistudio',
+      },
+    });
+
+    if (restRes.status === 429) {
+      return { address: '', city: '', quotaExceeded: true };
+    }
+
+    if (restRes.ok) {
+      const data: any = await restRes.json();
+      if (data?.status === 'OVER_QUERY_LIMIT') {
+        return { address: '', city: '', quotaExceeded: true };
+      }
+      const top = Array.isArray(data?.results) ? data.results[0] : null;
+      const formatted = typeof top?.formatted_address === 'string' ? top.formatted_address.trim() : '';
+      if (formatted && !isRawCoordinateString(formatted)) {
+        const city = extractCityFromComponents(top?.address_components);
+        const placeId = typeof top?.place_id === 'string' ? top.place_id : undefined;
+        reverseGeocodeCache.set(cacheKey, {
+          address: formatted,
+          city,
+          placeId,
+          cachedAt: Date.now(),
+        });
+        return { address: formatted, city, placeId };
+      }
+    }
+  } catch {
+    // Graceful fallback if offline
+  }
+
+  return null;
+}
+
+async function ensureHumanReadableLocation(loc: LocationCoordinate): Promise<LocationCoordinate> {
+  if (!isRawCoordinateString(loc.address)) {
+    return loc;
+  }
+  const resolved = await reverseGeocodeCoordinates(loc.lat, loc.lng);
+  if (resolved && resolved.address) {
+    return {
+      ...loc,
+      address: resolved.address,
+      city: resolved.city || (isRawCoordinateString(loc.city) ? '' : loc.city),
+      placeId: resolved.placeId || loc.placeId,
+    };
+  }
+  return {
+    ...loc,
+    address: isRawCoordinateString(loc.address) ? '' : loc.address,
+    city: isRawCoordinateString(loc.city) ? '' : loc.city,
+  };
+}
 
 const defaultLocations: Record<UserRole, LocationCoordinate> = {
   partner1: {
@@ -102,10 +254,10 @@ let activeView: AppSyncState['activeView'] = null;
 let stateVersion = 1;
 
 let appRelease: AppReleaseInfo = {
-  version: '1.3.0',
-  buildId: 2,
+  version: '1.4.0',
+  buildId: 3,
   publishedAt: Date.now(),
-  releaseNotes: '8 daily check-ins, background alerts & new attention tone',
+  releaseNotes: 'Google Maps addresses, heads-up alerts & 25-event history in Settings',
 };
 
 let androidConfig = {
@@ -158,8 +310,9 @@ function loadPersistedState() {
         };
       }
 
-      // Apply v1.3.0 migration: reset credits to 8/8, apply default "Name" if still on demo names, and bump OTA buildId
-      if (raw.schemaVersion !== CURRENT_SCHEMA_VERSION) {
+      // Apply schema migrations without erasing user settings/names
+      const savedSchemaVersion = typeof raw.schemaVersion === 'number' ? raw.schemaVersion : 0;
+      if (savedSchemaVersion < 3) {
         pings = [];
         if (profiles.partner1.name === 'Jordan') {
           profiles.partner1.name = 'Name';
@@ -169,11 +322,13 @@ function loadPersistedState() {
           profiles.partner2.name = 'Name';
           profiles.partner2.hasCompletedSetup = false;
         }
+      }
+      if (savedSchemaVersion < CURRENT_SCHEMA_VERSION) {
         appRelease = {
-          version: '1.3.0',
-          buildId: Math.max(2, (raw.appRelease?.buildId || 1) + 1),
+          version: '1.4.0',
+          buildId: Math.max(3, (raw.appRelease?.buildId || 2) + 1),
           publishedAt: Date.now(),
-          releaseNotes: '8 daily check-ins, background alerts & new attention tone',
+          releaseNotes: 'Google Maps addresses, heads-up alerts & 25-event history in Settings',
         };
       }
     }
@@ -230,6 +385,19 @@ function savePersistedState() {
 
 loadPersistedState();
 
+// Self-heal any persisted raw-coordinate addresses into Google Maps addresses in the background
+Promise.all(
+  (['partner1', 'partner2'] as UserRole[]).map(async (role) => {
+    if (isRawCoordinateString(profiles[role].currentLocation?.address)) {
+      const resolved = await ensureHumanReadableLocation(profiles[role].currentLocation);
+      if (resolved.address && resolved.address !== profiles[role].currentLocation.address) {
+        profiles[role].currentLocation = resolved;
+        savePersistedState();
+      }
+    }
+  })
+).catch(() => {});
+
 /**
  * Dispatches real encrypted Web Push notifications to all registered devices for targetRole
  * so notifications and emergency alerts arrive even when the app is completely closed or the phone screen is off.
@@ -242,18 +410,25 @@ async function sendPushToUser(
     targetRole: UserRole;
     title: string;
     body: string;
+    timestamp?: number;
   }
 ) {
   const subs = pushSubscriptions[targetRole] || [];
   if (!subs.length || !vapidKeys) return;
 
+  const enrichedPayload = {
+    ...payload,
+    timestamp: payload.timestamp || Date.now(),
+  };
+
   const validSubs: any[] = [];
   await Promise.all(
     subs.map(async (sub) => {
       try {
-        await webpush.sendNotification(sub, JSON.stringify(payload), {
+        await webpush.sendNotification(sub, JSON.stringify(enrichedPayload), {
           TTL: 3600,
           urgency: 'high',
+          topic: payload.type === 'emergency_alert' ? 'haven-emergency' : 'haven-ping',
         });
         validSubs.push(sub);
       } catch (err: any) {
@@ -377,8 +552,29 @@ app.post('/api/push-subscribe', (req, res) => {
 // Maps Config endpoint
 app.get('/api/maps-config', (req, res) => {
   res.json({
-    apiKey: process.env.VITE_GOOGLE_MAPS_API_KEY || process.env.GOOGLE_MAPS_API_KEY || '',
+    apiKey: getGoogleMapsApiKey(),
   });
+});
+
+// Server-side Reverse Geocoding proxy (resolves lat/lng into a human-readable Google Maps location)
+app.get('/api/reverse-geocode', async (req, res) => {
+  const lat = Number(req.query.lat);
+  const lng = Number(req.query.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    res.status(400).json({ error: 'Valid lat and lng query parameters are required' });
+    return;
+  }
+
+  const result = await reverseGeocodeCoordinates(lat, lng);
+  if (result?.quotaExceeded) {
+    res.status(429).json({ error: 'Google Maps Geocoding quota exceeded' });
+    return;
+  }
+  if (!result || !result.address) {
+    res.json({ address: '', city: '', placeId: undefined });
+    return;
+  }
+  res.json(result);
 });
 
 // 1. Get State
@@ -387,7 +583,7 @@ app.get('/api/state', (req, res) => {
 });
 
 // 2. Request Location (Standard 1 Token, 1-Minute Cooldown & Window)
-app.post('/api/request-location', (req, res) => {
+app.post('/api/request-location', async (req, res) => {
   const { requesterId } = req.body as { requesterId: UserRole };
   if (!requesterId || !profiles[requesterId]) {
     res.status(400).json({ error: 'Valid requesterId is required' });
@@ -420,7 +616,8 @@ app.post('/api/request-location', (req, res) => {
   }
 
   const expiresAt = now + STANDARD_VIEW_DURATION_MS;
-  const targetLocation = target.currentLocation;
+  const targetLocation = await ensureHumanReadableLocation(target.currentLocation);
+  profiles[targetId].currentLocation = targetLocation;
 
   const newPing: PingRecord = {
     id: `ping-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
@@ -483,7 +680,7 @@ app.post('/api/request-location', (req, res) => {
 });
 
 // 3. Emergency / Urgent Check-in Override
-app.post('/api/emergency', (req, res) => {
+app.post('/api/emergency', async (req, res) => {
   const { requesterId, reason } = req.body as { requesterId: UserRole; reason?: string };
   if (!requesterId || !profiles[requesterId]) {
     res.status(400).json({ error: 'Valid requesterId is required' });
@@ -507,7 +704,8 @@ app.post('/api/emergency', (req, res) => {
     reason: reason || 'Urgent alert triggered by partner',
   };
 
-  const targetLocation = profiles[targetId].currentLocation;
+  const targetLocation = await ensureHumanReadableLocation(profiles[targetId].currentLocation);
+  profiles[targetId].currentLocation = targetLocation;
 
   pings.push({
     id: `ping-emerg-${Date.now()}`,
@@ -602,7 +800,7 @@ app.post('/api/resolve-emergency', (req, res) => {
 });
 
 // 5. Update Profile
-app.post('/api/update-profile', (req, res) => {
+app.post('/api/update-profile', async (req, res) => {
   const {
     userId,
     name,
@@ -657,12 +855,13 @@ app.post('/api/update-profile', (req, res) => {
 
   const loc = currentLocation || location;
   if (loc !== undefined) {
-    profiles[userId].currentLocation = {
+    const resolvedLoc = await ensureHumanReadableLocation({
       ...loc,
       timestamp: Date.now(),
-    };
+    });
+    profiles[userId].currentLocation = resolvedLoc;
     if (activeView && activeView.targetId === userId) {
-      activeView.location = profiles[userId].currentLocation;
+      activeView.location = resolvedLoc;
     }
   }
   profiles[userId].lastSeen = Date.now();

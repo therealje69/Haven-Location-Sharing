@@ -7,6 +7,7 @@ export interface LocationCoordinate {
   accuracy?: number;
   address?: string;
   city?: string;
+  placeId?: string;
   timestamp: number;
 }
 
@@ -42,6 +43,7 @@ export interface AuditLogEntry {
     lat: number;
     lng: number;
     approxAddress?: string;
+    placeId?: string;
   };
 }
 

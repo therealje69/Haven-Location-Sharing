@@ -16,12 +16,30 @@ let htmlAudioElement: HTMLAudioElement | null = null;
 let urgentWavDataUri: string | null = null;
 let wakeLockSentinel: any = null;
 
+/**
+ * Requests the browser/OS AudioSession 'playback' mode where supported (e.g. iOS Safari/WebKit)
+ * so emergency alerts bypass the hardware mute/silent switch and route through the media speaker.
+ */
+function configureCriticalAudioSession(): void {
+  try {
+    if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
+      const session = (navigator as unknown as { audioSession?: { type?: string } }).audioSession;
+      if (session && session.type !== 'playback') {
+        session.type = 'playback';
+      }
+    }
+  } catch {
+    // Not supported on this browser
+  }
+}
+
 function getAudioContext(): AudioContext {
+  configureCriticalAudioSession();
   if (!audioCtx) {
     const AudioContextClass =
       window.AudioContext ||
       (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-    audioCtx = new AudioContextClass();
+    audioCtx = new AudioContextClass({ latencyHint: 'interactive' });
   }
   if (audioCtx.state === 'suspended') {
     audioCtx.resume().catch(() => {});
@@ -85,16 +103,18 @@ function getUrgentChimeWavDataUri(): string {
         const release = Math.min(1, (noteLen - localT) / 0.06);
         const env = attack * release;
 
-        // Warm fundamental + octave overtone (pleasant yet highly audible on phone speakers)
+        // Warm fundamental + octave overtone (pleasant yet highly audible at 0 dBFS on phone speakers)
         const fundamental = Math.sin(2 * Math.PI * n.freq * localT);
-        const overtone = 0.35 * Math.sin(2 * Math.PI * (n.freq * 2) * localT);
-        const fifth = 0.15 * Math.sin(2 * Math.PI * (n.freq * 1.5) * localT);
+        const overtone = 0.42 * Math.sin(2 * Math.PI * (n.freq * 2) * localT);
+        const fifth = 0.18 * Math.sin(2 * Math.PI * (n.freq * 1.5) * localT);
 
-        sample += (fundamental + overtone + fifth) * env * 0.72;
+        // Soft-clip saturation pushes RMS loudness close to 0 dBFS without harsh square-wave clipping
+        const raw = (fundamental + overtone + fifth) * env * 1.15;
+        sample += Math.tanh(raw);
       }
     }
 
-    const clamped = Math.max(-0.98, Math.min(0.98, sample));
+    const clamped = Math.max(-0.99, Math.min(0.99, sample));
     view.setInt16(44 + i * 2, Math.floor(clamped * 32767), true);
   }
 
@@ -123,8 +143,12 @@ export function unlockEmergencyAudioChannel(): void {
       audioUnlocked = true;
     }
 
+    configureCriticalAudioSession();
+
     if (!htmlAudioElement && typeof Audio !== 'undefined') {
       htmlAudioElement = new Audio(getUrgentChimeWavDataUri());
+      htmlAudioElement.setAttribute('playsinline', 'true');
+      (htmlAudioElement as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
       htmlAudioElement.loop = true;
       htmlAudioElement.volume = 1.0;
       htmlAudioElement.preload = 'auto';
@@ -275,9 +299,13 @@ export function startEASSiren(volume = 1.0): void {
   isPlaying = true;
 
   try {
-    // 1. Start HTML5 <audio> MediaSession loop (penetrates background / lock screen)
+    configureCriticalAudioSession();
+
+    // 1. Start HTML5 <audio> MediaSession loop (penetrates silent switch on iOS & background/lock screen)
     if (!htmlAudioElement && typeof Audio !== 'undefined') {
       htmlAudioElement = new Audio(getUrgentChimeWavDataUri());
+      htmlAudioElement.setAttribute('playsinline', 'true');
+      (htmlAudioElement as HTMLAudioElement & { playsInline?: boolean }).playsInline = true;
     }
     if (htmlAudioElement) {
       htmlAudioElement.muted = false;

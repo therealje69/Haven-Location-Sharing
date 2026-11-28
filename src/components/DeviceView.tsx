@@ -10,7 +10,6 @@ import {
 import { formatDynamicNotificationTime } from '../lib/tokenEngine.js';
 import { GoogleMapView } from './GoogleMapView.js';
 import { HavenLogoIcon } from './HavenLogo.js';
-import { AuditTrailView } from './AuditTrailView.js';
 import { SettingsView } from './SettingsView.js';
 import { EmergencyModal } from './EmergencyModal.js';
 import { DeviceUpdateBanner, subscribeDeviceToWebPush } from './PWAInstallAndUpdate.js';
@@ -21,7 +20,6 @@ import {
 } from '../lib/easAudio.js';
 import {
   MapPin,
-  Clock,
   Settings,
   Battery,
   BatteryCharging,
@@ -38,7 +36,6 @@ interface DeviceViewProps {
   onTriggerEmergency: (role: UserRole) => Promise<void>;
   onResolveEmergency: (role: UserRole) => Promise<void>;
   onUpdateProfile: (role: UserRole, update: Partial<UserProfile>) => Promise<void>;
-  onResetTokens: () => Promise<void>;
   onPushAppUpdate: () => Promise<void>;
   onOpenSetup: (role: UserRole) => void;
   onOpenInstallModal?: () => void;
@@ -90,7 +87,6 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
   onTriggerEmergency,
   onResolveEmergency,
   onUpdateProfile,
-  onResetTokens,
   onPushAppUpdate,
   onOpenSetup,
   onOpenInstallModal,
@@ -99,10 +95,12 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
   currentThemeMode,
   onThemeModeChange,
 }) => {
-  const [currentTab, setCurrentTab] = useState<'map' | 'history' | 'settings'>('map');
-  const [dismissedPingId, setDismissedPingId] = useState<string | null>(() => {
-    return localStorage.getItem(`haven_dismissed_ping_${myRole}`) || null;
-  });
+  const [currentTab, setCurrentTab] = useState<'map' | 'settings'>('map');
+  const [activeTopBannerPing, setActiveTopBannerPing] = useState<{
+    id: string;
+    timestamp: number;
+  } | null>(null);
+  const topBannerTimerRef = useRef<number | null>(null);
 
   const targetRole: UserRole = myRole === 'partner1' ? 'partner2' : 'partner1';
   const myProfile = state.profiles[myRole];
@@ -121,7 +119,11 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
   }, [isPermissionDeclined]);
 
   useEffect(() => {
-    setDismissedPingId(localStorage.getItem(`haven_dismissed_ping_${myRole}`) || null);
+    setActiveTopBannerPing(null);
+    if (topBannerTimerRef.current !== null) {
+      clearTimeout(topBannerTimerRef.current);
+      topBannerTimerRef.current = null;
+    }
   }, [myRole]);
 
   // Current time ticker for dynamic relative time updates
@@ -268,20 +270,42 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
 
     if ('geolocation' in navigator) {
       watchId = navigator.geolocation.watchPosition(
-        (pos) => {
+        async (pos) => {
           const now = Date.now();
           if (now - lastGeoSync < 15000) return;
           lastGeoSync = now;
           const lat = Number(pos.coords.latitude.toFixed(6));
           const lng = Number(pos.coords.longitude.toFixed(6));
           const accuracy = Math.round(pos.coords.accuracy || 10);
+
+          let resolvedAddress = '';
+          let resolvedCity = '';
+          let resolvedPlaceId: string | undefined;
+
+          try {
+            const geoRes = await fetch(
+              `/api/reverse-geocode?lat=${encodeURIComponent(lat)}&lng=${encodeURIComponent(lng)}`
+            );
+            if (geoRes.status === 429) {
+              window.dispatchEvent(new CustomEvent('gmp-quota-exceeded'));
+            } else if (geoRes.ok) {
+              const geoData = await geoRes.json();
+              if (geoData?.address) resolvedAddress = geoData.address;
+              if (geoData?.city) resolvedCity = geoData.city;
+              if (geoData?.placeId) resolvedPlaceId = geoData.placeId;
+            }
+          } catch {
+            // Server will also attempt reverse geocoding on /api/update-profile
+          }
+
           onUpdateProfile(myRole, {
             currentLocation: {
               lat,
               lng,
               accuracy,
-              address: `${lat.toFixed(4)}°, ${lng.toFixed(4)}°`,
-              city: 'Live GPS Signal',
+              address: resolvedAddress,
+              city: resolvedCity,
+              placeId: resolvedPlaceId,
               timestamp: now,
             },
           });
@@ -381,8 +405,10 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
     .filter((p) => p.targetId === myRole && p.type === 'standard')
     .sort((a, b) => b.timestamp - a.timestamp)[0];
 
-  // Fire sound and OS system notification when a new check-in happens
-  const lastFiredPingIdRef = useRef<string | null>(latestPingForMe?.id || null);
+  // Fire chime, high-priority OS heads-up notification, and temporary 8-second top banner on new check-in
+  const lastFiredPingIdRef = useRef<string | null>(
+    latestPingForMe && Date.now() - latestPingForMe.timestamp > 10000 ? latestPingForMe.id : null
+  );
   useEffect(() => {
     if (latestPingForMe && latestPingForMe.id !== lastFiredPingIdRef.current) {
       lastFiredPingIdRef.current = latestPingForMe.id;
@@ -397,28 +423,49 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
           body: `${reqName} viewed your location`,
           tag: `haven-ping-${latestPingForMe.id}`,
           renotify: true,
-          vibrate: [250, 120, 250],
+          requireInteraction: false,
+          silent: false,
+          vibrate: [220, 100, 220],
         });
+
+        // Show temporary floating top-of-screen pop-up banner for 8 seconds
+        setActiveTopBannerPing({
+          id: latestPingForMe.id,
+          timestamp: latestPingForMe.timestamp,
+        });
+        if (topBannerTimerRef.current !== null) {
+          clearTimeout(topBannerTimerRef.current);
+        }
+        topBannerTimerRef.current = window.setTimeout(() => {
+          setActiveTopBannerPing(null);
+          topBannerTimerRef.current = null;
+        }, 8000);
       }
     }
   }, [
     latestPingForMe?.id,
+    latestPingForMe?.timestamp,
     partnerProfile.name,
     myProfile.nicknameForPartner,
     isPermissionDeclined,
   ]);
 
-  const shouldShowNotification =
-    !isPermissionDeclined &&
-    latestPingForMe &&
-    latestPingForMe.id !== dismissedPingId &&
-    nowTime - latestPingForMe.timestamp < 30 * 24 * 3600 * 1000;
+  useEffect(() => {
+    return () => {
+      if (topBannerTimerRef.current !== null) {
+        clearTimeout(topBannerTimerRef.current);
+      }
+    };
+  }, []);
+
+  const shouldShowNotification = !isPermissionDeclined && Boolean(activeTopBannerPing);
 
   const handleDismissAlert = () => {
-    if (latestPingForMe) {
-      localStorage.setItem(`haven_dismissed_ping_${myRole}`, latestPingForMe.id);
-      setDismissedPingId(latestPingForMe.id);
+    if (topBannerTimerRef.current !== null) {
+      clearTimeout(topBannerTimerRef.current);
+      topBannerTimerRef.current = null;
     }
+    setActiveTopBannerPing(null);
   };
 
   const handlePrimaryCheckInClick = () => {
@@ -482,25 +529,29 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         isDay={isDay}
       />
 
-      {/* INCOMING LOCATION VIEWED POPUP BANNER */}
-      {shouldShowNotification && latestPingForMe && (
+      {/* TEMPORARY TOP-OF-SCREEN HEADS-UP POP-UP BANNER (Auto-dismisses after 8s) */}
+      {shouldShowNotification && activeTopBannerPing && (
         <div
-          className={`px-3.5 py-2.5 flex items-center justify-between text-xs font-medium border-b animate-slideDown z-40 ${
+          role="status"
+          aria-live="polite"
+          className={`absolute top-2.5 left-2.5 right-2.5 px-3 py-2 rounded-2xl flex items-center justify-between gap-2 text-xs font-medium border shadow-xl backdrop-blur-md animate-slideDown z-50 ${
             isDay
-              ? 'bg-blue-50/95 border-blue-200 text-blue-950 shadow-sm'
-              : 'bg-[#091326]/95 border-blue-900/60 text-blue-100 shadow-sm'
+              ? 'bg-white/95 border-blue-200 text-blue-950 shadow-blue-900/10'
+              : 'bg-slate-900/95 border-blue-700/70 text-blue-50 shadow-black/40'
           }`}
         >
-          <div className="flex items-center gap-2 truncate min-w-0 mr-2">
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <HavenLogoIcon size={18} className="shrink-0" />
-            <div className="truncate text-xs">
-              <span className={`font-semibold ${isPartnerNameUnset ? 'opacity-50 text-slate-400' : ''}`}>
-                {partnerDisplayName}
-              </span>
-              <span className="opacity-90"> viewed your location</span>
-              <span className="text-[11px] text-[#2DD4BF] dark:text-[#2DD4BF] ml-1.5 font-mono">
-                · {formatDynamicNotificationTime(latestPingForMe.timestamp, nowTime)}
-              </span>
+            <div className="min-w-0 flex-1 leading-snug">
+              <div className="text-[11px] break-words">
+                <span className={`font-semibold ${isPartnerNameUnset ? 'opacity-50 text-slate-400' : ''}`}>
+                  {partnerDisplayName}
+                </span>
+                <span className="opacity-90"> viewed your location</span>
+              </div>
+              <div className="text-[10px] text-[#2DD4BF] font-mono mt-0.5">
+                {formatDynamicNotificationTime(activeTopBannerPing.timestamp, nowTime)}
+              </div>
             </div>
           </div>
           <button
@@ -662,26 +713,18 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
           </div>
         )}
 
-        {currentTab === 'history' && (
-          <AuditTrailView
-            auditLog={isPermissionDeclined ? [] : state.auditLog}
-            profiles={state.profiles}
-            myRole={myRole}
-            theme={theme}
-          />
-        )}
-
         {currentTab === 'settings' && (
           <SettingsView
             key={myRole}
             myRole={myRole}
             myProfile={myProfile}
             partnerProfile={partnerProfile}
+            profiles={state.profiles}
+            auditLog={isPermissionDeclined ? [] : state.auditLog}
             tokensRemaining={myTokens}
             msUntilRefresh={msUntilRefresh}
             appRelease={state.appRelease}
             onUpdateProfile={onUpdateProfile}
-            onResetTokens={onResetTokens}
             onToggleLogout={handleToggleLogout}
             onPushAppUpdate={onPushAppUpdate}
             onOpenSetup={() => onOpenSetup(myRole)}
@@ -693,7 +736,7 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         )}
       </main>
 
-      {/* COMPACT BOTTOM NAVIGATION BAR ("Settings" only) */}
+      {/* COMPACT BOTTOM NAVIGATION BAR (History moved inside Settings) */}
       <nav
         className={`px-3 py-1.5 border-t flex items-center justify-around text-[10px] font-semibold z-10 ${
           isDay ? 'bg-white/95 border-slate-200' : 'bg-[#091326]/95 border-slate-800'
@@ -707,7 +750,7 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
             }
             setCurrentTab('map');
           }}
-          className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition ${
+          className={`flex flex-col items-center gap-0.5 py-1 px-6 rounded-xl transition ${
             currentTab === 'map'
               ? 'text-[#3B82F6] dark:text-[#2DD4BF] bg-blue-500/10'
               : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
@@ -718,26 +761,8 @@ export const DeviceView: React.FC<DeviceViewProps> = ({
         </button>
 
         <button
-          onClick={() => {
-            if (isPermissionDeclined) {
-              setShowDeclinedPopup(true);
-              return;
-            }
-            setCurrentTab('history');
-          }}
-          className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition ${
-            currentTab === 'history'
-              ? 'text-[#3B82F6] dark:text-[#2DD4BF] bg-blue-500/10'
-              : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'
-          }`}
-        >
-          <Clock className="w-4 h-4" />
-          <span>History</span>
-        </button>
-
-        <button
           onClick={() => setCurrentTab('settings')}
-          className={`flex flex-col items-center gap-0.5 py-1 px-3 rounded-xl transition ${
+          className={`flex flex-col items-center gap-0.5 py-1 px-6 rounded-xl transition ${
             currentTab === 'settings'
               ? 'text-[#3B82F6] dark:text-[#2DD4BF] bg-blue-500/10'
               : 'text-slate-400 hover:text-slate-700 dark:hover:text-slate-200'

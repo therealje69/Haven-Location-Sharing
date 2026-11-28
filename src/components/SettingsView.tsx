@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   AppReleaseInfo,
+  AuditLogEntry,
   GoogleAuthProfile,
   ThemeMode,
   UserProfile,
@@ -8,7 +9,9 @@ import {
   isDefaultUnsetName,
 } from '../lib/types.js';
 import { formatRefreshTime, MAX_DAILY_TOKENS } from '../lib/tokenEngine.js';
+import { MAX_HISTORY_EVENTS, getRecentAuditEntries } from '../lib/locationUtils.js';
 import { playEASPreview, unlockEmergencyAudioChannel } from '../lib/easAudio.js';
+import { AuditTrailView } from './AuditTrailView.js';
 import {
   User,
   Sun,
@@ -21,17 +24,23 @@ import {
   Clock,
   ShieldCheck,
   RefreshCw,
+  ChevronRight,
+  History,
 } from 'lucide-react';
 
 interface SettingsViewProps {
   myRole: UserRole;
   myProfile: UserProfile;
   partnerProfile: UserProfile;
+  profiles: {
+    partner1: UserProfile;
+    partner2: UserProfile;
+  };
+  auditLog: AuditLogEntry[];
   tokensRemaining: number;
   msUntilRefresh: number | null;
   appRelease: AppReleaseInfo;
   onUpdateProfile: (role: UserRole, update: Partial<UserProfile>) => Promise<void>;
-  onResetTokens: () => Promise<void>;
   onToggleLogout: (loggedOut: boolean) => Promise<void>;
   onPushAppUpdate: () => Promise<void>;
   onOpenSetup: () => void;
@@ -44,11 +53,12 @@ interface SettingsViewProps {
 export const SettingsView: React.FC<SettingsViewProps> = ({
   myRole,
   myProfile,
+  profiles,
+  auditLog,
   tokensRemaining,
   msUntilRefresh,
   appRelease,
   onUpdateProfile,
-  onResetTokens,
   onToggleLogout,
   onPushAppUpdate,
   onOpenSetup,
@@ -59,13 +69,13 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
 }) => {
   const isDay = theme === 'day';
 
+  const [showHistory, setShowHistory] = useState(false);
   const [name, setName] = useState(() =>
     isDefaultUnsetName(myProfile.name) ? '' : myProfile.name
   );
   const [nickname, setNickname] = useState(myProfile.nicknameForPartner || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [testToneActive, setTestToneActive] = useState(false);
-  const [resetSuccess, setResetSuccess] = useState(false);
   const [pushSuccess, setPushSuccess] = useState(false);
 
   useEffect(() => {
@@ -105,12 +115,6 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     }
   };
 
-  const handleResetTokensClick = async () => {
-    await onResetTokens();
-    setResetSuccess(true);
-    setTimeout(() => setResetSuccess(false), 2000);
-  };
-
   const handleTestTone = async () => {
     setTestToneActive(true);
     await playEASPreview(2400);
@@ -124,11 +128,25 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   };
 
   const criticalEnabled = myProfile.criticalAlertsAllowed ?? true;
+  const recentHistoryCount = getRecentAuditEntries(auditLog, MAX_HISTORY_EVENTS).length;
+
+  // Render History sub-view directly inside the Settings tab
+  if (showHistory) {
+    return (
+      <AuditTrailView
+        auditLog={auditLog}
+        profiles={profiles}
+        myRole={myRole}
+        theme={theme}
+        onBack={() => setShowHistory(false)}
+      />
+    );
+  }
 
   return (
     <div className="h-full flex flex-col justify-between py-1 text-xs select-none overflow-y-auto no-scrollbar">
       <div className="space-y-2.5">
-        {/* 1. Daily Check-in Balance (8 daily allowance) */}
+        {/* 1. Daily Check-in Balance (8 daily allowance — Replenish button removed) */}
         <div
           className={`p-3 rounded-2xl border ${
             isDay ? 'bg-white border-slate-200' : 'bg-[#091326] border-slate-800'
@@ -145,7 +163,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
               {tokensRemaining} of {MAX_DAILY_TOKENS} ready
             </span>
           </div>
-          <div className="flex items-center justify-between text-[11px] text-slate-500">
+          <div className="flex items-center text-[11px] text-slate-500">
             <span className="flex items-center gap-1 font-['Inter',sans-serif]">
               <Clock className="w-3 h-3 text-slate-400" />
               <span>
@@ -154,16 +172,41 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                   : `Next ready: ${formatRefreshTime(msUntilRefresh)}`}
               </span>
             </span>
-            <button
-              onClick={handleResetTokensClick}
-              className="text-[10px] text-[#3B82F6] dark:text-[#2DD4BF] font-semibold hover:underline"
-            >
-              {resetSuccess ? 'Replenished!' : 'Replenish'}
-            </button>
           </div>
         </div>
 
-        {/* 2. Minimal Naming Area */}
+        {/* 2. History (Moved inside Settings — Most recent 25 events) */}
+        <button
+          type="button"
+          onClick={() => setShowHistory(true)}
+          className={`w-full p-3 rounded-2xl border flex items-center justify-between gap-2 text-left transition ${
+            isDay
+              ? 'bg-white border-slate-200 hover:border-blue-300'
+              : 'bg-[#091326] border-slate-800 hover:border-blue-700'
+          }`}
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="p-1.5 rounded-xl bg-blue-500/10 text-[#3B82F6] dark:text-[#2DD4BF] shrink-0">
+              <History className="w-3.5 h-3.5" />
+            </div>
+            <div className="min-w-0">
+              <div className="font-bold text-xs font-['JetBrains_Mono',monospace]">
+                History
+              </div>
+              <div className="text-[10px] text-slate-500 truncate">
+                Most recent {MAX_HISTORY_EVENTS} check-in events
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-1.5 shrink-0">
+            <span className="px-2 py-0.5 rounded-md text-[10px] font-mono font-semibold bg-blue-500/10 text-[#3B82F6] dark:text-[#2DD4BF]">
+              {recentHistoryCount}/{MAX_HISTORY_EVENTS}
+            </span>
+            <ChevronRight className="w-4 h-4 text-slate-400" />
+          </div>
+        </button>
+
+        {/* 3. Minimal Naming Area */}
         <form
           onSubmit={handleSaveNames}
           className={`p-3 rounded-2xl border space-y-2 ${
@@ -227,7 +270,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </form>
 
-        {/* 3. Emergency Alert Override */}
+        {/* 4. Emergency Alert Override */}
         <div
           className={`p-3 rounded-2xl border space-y-2 ${
             isDay ? 'bg-white border-slate-200' : 'bg-[#091326] border-slate-800'
@@ -273,7 +316,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 4. Theme Mode (Day, Night, System) */}
+        {/* 5. Theme Mode (Day, Night, System) */}
         <div
           className={`p-2.5 rounded-2xl border ${
             isDay ? 'bg-white border-slate-200' : 'bg-[#091326] border-slate-800'
@@ -321,28 +364,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           </div>
         </div>
 
-        {/* 5. Seamless OTA App Updates & Google Account */}
+        {/* 6. Seamless OTA App Updates & Google Account */}
         <div
-          className={`p-2.5 rounded-2xl border flex items-center justify-between gap-2 ${
+          className={`p-3 rounded-2xl border space-y-2 ${
             isDay ? 'bg-white border-slate-200' : 'bg-[#091326] border-slate-800'
           }`}
         >
-          <div className="min-w-0">
+          <div className="flex items-center justify-between gap-2">
             <div className="font-bold text-xs font-['JetBrains_Mono',monospace] flex items-center gap-1.5">
               <ShieldCheck className="w-3.5 h-3.5 text-[#2DD4BF] shrink-0" />
-              <span>Haven v{appRelease?.version || '1.3.0'}</span>
+              <span>Haven v{appRelease?.version || '1.4.0'}</span>
             </div>
-            <div className="text-[10px] text-slate-500 truncate">
-              OTA updates apply directly to installed app
-            </div>
+            <span className="text-[10px] text-slate-400 truncate">OTA updates enabled</span>
           </div>
 
-          <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5">
             {onOpenInstallModal && (
               <button
                 type="button"
                 onClick={onOpenInstallModal}
-                className="px-2 py-1 rounded-lg bg-gradient-to-r from-[#3B82F6] to-[#2563EB] text-white text-[10px] font-semibold transition shadow-xs"
+                className="flex-1 px-2 py-1.5 rounded-lg bg-gradient-to-r from-[#3B82F6] to-[#2563EB] text-white text-[10px] font-semibold transition shadow-xs text-center"
               >
                 Install / APK
               </button>
@@ -350,7 +391,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <button
               type="button"
               onClick={handlePushUpdateClick}
-              className="px-2 py-1 rounded-lg border border-blue-500/30 bg-blue-500/10 text-[#3B82F6] dark:text-[#2DD4BF] text-[10px] font-semibold flex items-center gap-1 hover:bg-blue-500/20 transition"
+              className="flex-1 px-2 py-1.5 rounded-lg border border-blue-500/30 bg-blue-500/10 text-[#3B82F6] dark:text-[#2DD4BF] text-[10px] font-semibold flex items-center justify-center gap-1 hover:bg-blue-500/20 transition"
             >
               <RefreshCw className="w-3 h-3" />
               <span>{pushSuccess ? 'Pushed!' : 'OTA Update'}</span>
@@ -358,7 +399,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             <button
               type="button"
               onClick={handleGoogleAuthSim}
-              className={`px-2 py-1 rounded-lg text-[10px] font-semibold transition ${
+              className={`px-2.5 py-1.5 rounded-lg text-[10px] font-semibold transition ${
                 myProfile.googleUser
                   ? 'border border-slate-300 dark:border-slate-700 text-slate-500'
                   : 'border border-slate-300 dark:border-slate-700 text-slate-600 dark:text-slate-300'
@@ -370,7 +411,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
         </div>
       </div>
 
-      {/* 6. Bottom Control: Log Out / Pause */}
+      {/* 7. Bottom Control: Log Out / Pause */}
       <div className="pt-2 border-t border-slate-200 dark:border-slate-800">
         <button
           onClick={() => onToggleLogout(!myProfile.isLoggedOut)}

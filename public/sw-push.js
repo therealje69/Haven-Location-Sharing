@@ -18,19 +18,20 @@ self.addEventListener('push', (event) => {
     icon: '/pwa-192x192.png',
     badge: '/pwa-192x192.png',
     tag: isEmergency ? 'haven-emergency-alert' : `haven-ping-${payload.id || Date.now()}`,
+    timestamp: payload.timestamp || Date.now(),
     renotify: true,
     requireInteraction: isEmergency,
     silent: false,
     vibrate: isEmergency
       ? [600, 150, 600, 150, 900, 150, 600, 150, 900, 150, 1000]
-      : [250, 120, 250],
+      : [220, 100, 220],
     data: payload,
     actions: isEmergency
       ? [
           { action: 'mark_safe', title: 'I Am Safe' },
           { action: 'open_app', title: 'Open Alert' },
         ]
-      : [{ action: 'open_app', title: 'Open Haven' }],
+      : [{ action: 'open_app', title: 'View' }],
   };
 
   event.waitUntil(
