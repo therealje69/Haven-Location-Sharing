@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { UserProfile, UserRole } from '../lib/types.js';
 import { usePWAInstall } from './PWAInstallAndUpdate.js';
 import { HavenLogoIcon } from './HavenLogo.js';
+import { serializeHavenManifest } from '../lib/pwaManifest.js';
 import {
   Download,
   Smartphone,
@@ -10,7 +11,10 @@ import {
   Package,
   ShieldCheck,
   Share2,
-  Users
+  Users,
+  FileJson,
+  Eye,
+  EyeOff,
 } from 'lucide-react';
 
 interface InstallAndPlayStoreModalProps {
@@ -35,12 +39,15 @@ export const InstallAndPlayStoreModal: React.FC<InstallAndPlayStoreModalProps> =
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [activeTab, setActiveTab] = useState<'install' | 'apk'>('install');
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [showManifestPreview, setShowManifestPreview] = useState(false);
 
   const [packageName, setPackageName] = useState('app.haven.locationshare');
   const [sha256Fingerprint, setSha256Fingerprint] = useState('');
   const [savedAssetLinks, setSavedAssetLinks] = useState(false);
 
   const appOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const manifestUrl = `${appOrigin}/manifest.json`;
+  const manifestJsonText = serializeHavenManifest();
   const phone1Url = `${appOrigin}/?user=partner1`;
   const phone2Url = `${appOrigin}/?user=partner2`;
 
@@ -80,13 +87,26 @@ export const InstallAndPlayStoreModal: React.FC<InstallAndPlayStoreModalProps> =
     }
   };
 
+  const handleDownloadManifest = (format: 'json' | 'webmanifest' = 'json') => {
+    const filename = format === 'webmanifest' ? 'manifest.webmanifest' : 'manifest.json';
+    const blob = new Blob([manifestJsonText], { type: 'application/manifest+json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
   const handleDownloadBubblewrapScript = () => {
     const scriptContent = `#!/usr/bin/env bash
 # Haven Android APK & Google Play Store (.aab) Builder
 # Prerequisite: Node.js 18+ and npx
 
 echo "Building Haven Android APK & Play Store Bundle from ${appOrigin}..."
-npx @bubblewrap/cli init --manifest="${appOrigin}/manifest.webmanifest"
+npx @bubblewrap/cli init --manifest="${appOrigin}/manifest.json"
 npx @bubblewrap/cli build
 echo "Done! Your installable app-release-signed.apk and app-release-bundle.aab (for Google Play Store) are ready."
 `;
@@ -311,6 +331,97 @@ echo "Done! Your installable app-release-signed.apk and app-release-bundle.aab (
             </>
           ) : (
             <>
+              {/* Web App Manifest Download & PWABuilder Readiness Card */}
+              <div
+                className={`p-3 rounded-2xl border space-y-2.5 ${
+                  isDay ? 'bg-blue-50/70 border-blue-200' : 'bg-blue-950/30 border-blue-900/50'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="font-bold text-[11px] font-['JetBrains_Mono',monospace] text-[#3B82F6] dark:text-[#2DD4BF] flex items-center gap-1.5">
+                    <FileJson className="w-3.5 h-3.5 shrink-0" />
+                    <span>Web App Manifest (PWABuilder)</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowManifestPreview((prev) => !prev)}
+                    className="text-[10px] font-semibold text-[#3B82F6] dark:text-[#2DD4BF] hover:underline flex items-center gap-1"
+                  >
+                    {showManifestPreview ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                    <span>{showManifestPreview ? 'Hide JSON' : 'Preview'}</span>
+                  </button>
+                </div>
+
+                <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
+                  Served live at <code>/manifest.json</code> and <code>/manifest.webmanifest</code> with 192px, 512px, and maskable PNG icons. Download or copy it directly below:
+                </p>
+
+                <div className="grid grid-cols-2 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadManifest('json')}
+                    className="py-2 px-2.5 rounded-xl bg-gradient-to-r from-[#3B82F6] to-[#2563EB] hover:from-[#2563EB] hover:to-[#1D4ED8] text-white font-bold text-[11px] flex items-center justify-center gap-1.5 shadow-xs transition"
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>manifest.json</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadManifest('webmanifest')}
+                    className={`py-2 px-2.5 rounded-xl border font-bold text-[11px] flex items-center justify-center gap-1.5 transition ${
+                      isDay
+                        ? 'bg-white border-blue-200 text-blue-700 hover:bg-blue-50'
+                        : 'bg-slate-900 border-blue-800/70 text-[#2DD4BF] hover:bg-slate-800'
+                    }`}
+                  >
+                    <Download className="w-3.5 h-3.5 shrink-0" />
+                    <span>.webmanifest</span>
+                  </button>
+                </div>
+
+                <div className="flex items-center gap-1.5">
+                  <code className="flex-1 p-1.5 rounded-lg bg-white/80 dark:bg-slate-950 border border-slate-200 dark:border-slate-800 font-mono text-[10px] truncate">
+                    {manifestUrl}
+                  </code>
+                  <button
+                    type="button"
+                    onClick={() => copyText(manifestUrl, 'manifestUrl')}
+                    className={`px-2 py-1.5 rounded-lg border text-[10px] font-bold shrink-0 flex items-center gap-1 ${
+                      isDay
+                        ? 'bg-white border-slate-200 text-slate-700 hover:bg-slate-100'
+                        : 'bg-slate-900 border-slate-700 text-slate-200 hover:bg-slate-800'
+                    }`}
+                  >
+                    {copiedKey === 'manifestUrl' ? <Check className="w-3 h-3 text-emerald-500" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedKey === 'manifestUrl' ? 'Copied' : 'URL'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => copyText(manifestJsonText, 'manifestJson')}
+                    className="px-2 py-1.5 rounded-lg bg-[#3B82F6] text-white text-[10px] font-bold shrink-0 flex items-center gap-1"
+                  >
+                    {copiedKey === 'manifestJson' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                    <span>{copiedKey === 'manifestJson' ? 'Copied' : 'JSON'}</span>
+                  </button>
+                </div>
+
+                {showManifestPreview && (
+                  <pre className="p-2.5 rounded-xl bg-slate-950 text-emerald-300 font-mono text-[10px] overflow-x-auto max-h-48 overflow-y-auto border border-slate-800 select-text">
+                    {manifestJsonText}
+                  </pre>
+                )}
+
+                <div
+                  className={`p-2 rounded-xl text-[10px] leading-relaxed border ${
+                    isDay
+                      ? 'bg-amber-50 border-amber-200 text-amber-900'
+                      : 'bg-amber-950/40 border-amber-800/50 text-amber-200'
+                  }`}
+                >
+                  <strong>PWABuilder tip:</strong> Private AI Studio preview links (<code>ais-dev-*</code> / <code>ais-pre-*</code>) require Google sign-in, which prevents PWABuilder from reading the page and causes a &ldquo;No manifest&rdquo; error. Deploy the app to a public URL (no login wall) before scanning on <strong>pwabuilder.com</strong>, or use the downloaded <code>manifest.json</code> above.
+                </div>
+              </div>
+
               {/* Tab 2: Generate Downloadable .APK & Google Play Store .AAB */}
               <div
                 className={`p-3 rounded-2xl border space-y-2 ${
@@ -341,7 +452,7 @@ echo "Done! Your installable app-release-signed.apk and app-release-bundle.aab (
                     </div>
                   </li>
                   <li>
-                    Go to <strong>pwabuilder.com</strong>, paste your published URL, and click <strong>Start</strong>.
+                    Go to <strong>pwabuilder.com</strong>, paste your public deployed URL, and click <strong>Start</strong>.
                   </li>
                   <li>
                     Click <strong>Package for stores</strong> → <strong>Android</strong> → <strong>Download Package</strong>.

@@ -18,6 +18,7 @@ import type {
 } from './src/lib/types.ts';
 import { formatPartnerDisplayName } from './src/lib/types.ts';
 import { isRawCoordinateString } from './src/lib/locationUtils.ts';
+import { serializeHavenManifest } from './src/lib/pwaManifest.ts';
 import {
   calculateTokenStatus,
   canRequestLocation,
@@ -489,9 +490,33 @@ function buildStatePayload(): AppSyncState {
   };
 }
 
+// Web App Manifest endpoints (/manifest.json & /manifest.webmanifest) with CORS for PWABuilder & TWA tools
+const sendManifestResponse = (_req: express.Request, res: express.Response) => {
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+  res.send(serializeHavenManifest());
+};
+
+app.get('/manifest.json', sendManifestResponse);
+app.get('/manifest.webmanifest', sendManifestResponse);
+
+// Direct attachment download endpoint for easy PWABuilder / manual manifest download
+app.get('/api/manifest/download', (req, res) => {
+  const format = req.query.format === 'webmanifest' ? 'webmanifest' : 'json';
+  const filename = format === 'webmanifest' ? 'manifest.webmanifest' : 'manifest.json';
+  const originParam = typeof req.query.origin === 'string' ? req.query.origin : undefined;
+
+  res.setHeader('Content-Type', 'application/manifest+json; charset=utf-8');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(serializeHavenManifest({ origin: originParam }));
+});
+
 // Android Digital Asset Links (/.well-known/assetlinks.json) for Google Play Store TWA & APK full-screen verification
 app.get('/.well-known/assetlinks.json', (req, res) => {
   res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Access-Control-Allow-Origin', '*');
   res.json([
     {
       relation: [
